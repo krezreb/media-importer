@@ -125,6 +125,18 @@ python -m media_importer
 
 Both entry points must launch the same application.
 
+## 4.1 No Command-Line Flags in v1
+
+v1 accepts **no command-line arguments at all**. Both entry points launch straight into the TUI.
+
+There is no `--version`, no `--dry-run`, no `--config`, and no way to override configured paths from
+the shell. Every setting is viewed and changed inside the TUI and persisted to the configuration
+file (section 6). `--dry-run` in particular is unnecessary: the import preview (SPEC section 17) is
+already a mandatory dry run that the user must confirm before anything is copied.
+
+The entry point must therefore not build an argument parser. Any unexpected argument is ignored
+rather than triggering a usage error, so that the application never fails to start over argv.
+
 ---
 
 # 5. TUI Framework
