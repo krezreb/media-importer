@@ -60,25 +60,25 @@ The TUI should be designed for normal repeated use rather than requiring the use
 
 # 3. Persistent Configuration
 
-Application settings must be persisted in the user's home directory.
-
-For example:
+Application settings must be persisted in the user's XDG configuration directory:
 
 ```text
-~/.<application-name>/
+~/.config/media-importer/
 └── config.toml
 ```
 
-The exact configuration format and location may be chosen during implementation.
-
-At minimum, the configuration must contain:
+The configuration must contain:
 
 ```toml
-source_path = "/path/to/import"
-photo_library = "/path/to/photos"
-video_library = "/path/to/videos"
-import_path = "YYYY/MM/DD"
+source_path      = "/path/to/import"
+photo_library    = "/path/to/photos"
+video_library    = "/path/to/videos"
+import_path      = "YYYY/MM/DD"
+on_collision     = "skip"        # skip | clobber | rename
+clobber_prefers  = "newest"      # newest | oldest  (only used when on_collision = "clobber")
 ```
+
+`on_collision` and `clobber_prefers` are described in section 14.1.
 
 Previously configured values must automatically be loaded when the application starts.
 
@@ -87,6 +87,26 @@ The default destination path scheme must be:
 ```text
 YYYY/MM/DD
 ```
+
+---
+
+## 3.1 Path Validation
+
+Before any scan begins, the three configured paths must be validated together.
+
+Each path is first fully resolved to an absolute real path, with all symlinks resolved, so that
+indirection cannot be used to defeat the check.
+
+None of the three paths may be nested inside another:
+
+- `photo_library` must not lie inside `source_path`, and `source_path` must not lie inside `photo_library`.
+- The same applies to `video_library`.
+- A path must not equal another, except that `photo_library` and `video_library` may be identical
+  if the user deliberately wants a single combined library.
+
+A nested configuration would cause the scanner to rediscover files it has just written, so it must
+be treated as a **fatal error**: the application must report which two paths conflict and must not
+begin the import.
 
 ---
 
@@ -121,6 +141,22 @@ The destination location is determined from the media's resolved capture date an
 
 ---
 
+## 4.1 Symlinks
+
+Symbolic links are ignored entirely.
+
+- The scanner must not follow symlinked directories. This also prevents symlink loops from hanging
+  a recursive scan.
+- A symlink to a media file must not be imported, even when its target is a supported media file.
+
+Ignored symlinks should be counted and reported so the user can tell the difference between
+"not found" and "deliberately skipped".
+
+In the destination libraries, an existing entry that is a symlink must never be overwritten,
+clobbered, or renamed. Such a file is reported as an error for that item and the import continues.
+
+---
+
 # 5. Media Classification
 
 The importer must classify discovered files into:
@@ -135,23 +171,14 @@ At minimum, the application should recognize common formats.
 
 ### Photos
 
-Examples include:
-
 - JPG / JPEG
 - PNG
-- TIFF
-- DNG
-- CR2
-- CR3
-- NEF
-- ORF
-- RW2
-- ARW
-- Other common RAW formats
+- TIFF / TIF
+- HEIC / HEIF
+- WEBP
+- Camera RAW formats (see 5.1)
 
 ### Videos
-
-Examples include:
 
 - MP4
 - MOV
@@ -160,8 +187,45 @@ Examples include:
 - MPG / MPEG
 - MTS
 - 3GP
+- MKV
+- WEBM
+- INSV
 
 Unsupported files must be ignored and must not be copied.
+
+---
+
+## 5.1 RAW Formats
+
+A distinct subset of the photo extensions is recognized as **camera RAW**. This subset exists only
+to drive RAW/JPEG pairing (section 12) and has no other effect.
+
+RAW means a camera manufacturer's raw capture format:
+
+```text
+DNG  CR2  CR3  NEF  NRW  ARW  ORF  RW2  RAF
+PEF  SRW  RWL  ERF  3FR  IIQ  X3F  MEF  MOS  KDC  DCR
+```
+
+**TIFF is not RAW.** Neither is PNG, HEIC, WEBP, or JPEG. A TIFF sitting next to a JPEG of the same
+name is not a pair and both files are imported normally.
+
+---
+
+## 5.2 Live Photos
+
+Apple Live Photos appear as two files sharing a stem, for example:
+
+```text
+IMG_1234.HEIC
+IMG_1234.MOV
+```
+
+These are **not** treated as a pair. HEIC is not a RAW format, so pairing does not apply. The still
+is imported into the photo library and the movie into the video library, each dated independently.
+
+This is intentional and must be documented so that the split is not mistaken for a bug. Suppressing
+Live Photo movie sidecars may be added later as an explicit configuration option.
 
 ---
 
@@ -189,6 +253,43 @@ The date resolution process differs between photos and videos.
 
 ---
 
+## 6.1 Metadata Date Sanity Check
+
+Embedded metadata routinely contains junk dates. The QuickTime epoch `1904-01-01`, the Unix epoch
+`1970-01-01`, and the all-zero EXIF value `0000:00:00 00:00:00` are all common in real files, and a
+naive reader will happily file media under the year 1904.
+
+Every candidate date obtained from metadata must therefore pass a plausibility check before it is
+accepted. A candidate is **garbage** if any of the following hold:
+
+1. It cannot be parsed as a real calendar date and time.
+2. It falls before the floor `1990-01-01`.
+3. It falls more than **2 years after the file's filesystem modification time (mtime)**.
+
+Rule 3 is deliberately asymmetric. A capture date *older* than mtime is completely normal — the file
+has been copied between disks, and copying updates mtime while the capture date stays put. A capture
+date meaningfully *newer* than mtime is impossible, because a file cannot have been recorded after
+it was last written.
+
+```text
+floor   = 1990-01-01
+ceiling = mtime + 2 years
+
+EXIF 1904-01-01                     -> garbage (below floor)
+EXIF 0000:00:00 00:00:00            -> garbage (unparseable)
+EXIF 2015-06-02, mtime 2024-01-10   -> accepted (old file, recently copied)
+EXIF 2031-01-01, mtime 2025-08-29   -> garbage (captured in the future)
+```
+
+A garbage metadata date must be discarded and resolution must continue to the next tier, exactly as
+though the metadata field had been absent. It must never be used, and it must never cause the file
+to be skipped outright.
+
+The check applies to metadata dates for both photos and videos. It does not apply to dates derived
+from the filename or from the filesystem, which are already bounded by construction.
+
+---
+
 # 7. Photo Date Resolution
 
 For photos, the application should primarily use EXIF metadata to determine the original capture date.
@@ -199,11 +300,24 @@ The preferred field is:
 DateTimeOriginal
 ```
 
-Other appropriate EXIF date fields may be used as fallbacks when `DateTimeOriginal` is unavailable.
+When `DateTimeOriginal` is unavailable, the following fields are consulted in this exact order:
+
+```text
+1. DateTimeOriginal      (EXIF 0x9003)
+2. CreateDate            (EXIF DateTimeDigitized, 0x9004)
+3. DateTime              (EXIF ModifyDate, 0x0132)
+```
+
+The list is ordered and closed: the first field yielding a date that passes the sanity check in
+section 6.1 wins, and no other field is consulted. Leaving the fallback set open-ended would make
+photo dating non-deterministic, which section 24 forbids.
 
 A valid camera capture date from EXIF must take precedence over filesystem timestamps.
 
 The source directory structure must never be used to determine the date.
+
+Photos do **not** fall back to the filename or to filesystem timestamps. Unlike video metadata, EXIF
+is consistent enough to rely on, and a photo whose EXIF is absent or garbage is reported as undated.
 
 ## Example
 
@@ -237,9 +351,13 @@ The date resolution priority must be:
 
 1. Video metadata
 2. Filename date/time
-3. Filesystem creation/birth time
+3. Filesystem time
 
-The first reliable date found must be used.
+The first date that is found *and* passes the sanity check in section 6.1 must be used.
+
+The bulk of the implementation effort belongs in tiers 1 and 2. The filesystem is the last resort
+and the least trustworthy source, because it describes the file rather than the recording. Tier 3
+exists so that a video is not lost, not because it is expected to be correct.
 
 ## 8.1 Metadata
 
@@ -283,17 +401,30 @@ The filename parsing logic should be modular so additional patterns can be added
 
 ---
 
-## 8.3 Filesystem Creation Time
+## 8.3 Filesystem Time
 
-If neither metadata nor the filename provides a usable date, use the filesystem **creation/birth time**.
+If neither metadata nor the filename provides a usable date, use a filesystem timestamp.
 
-This is specifically the final fallback for videos.
+This is specifically the final fallback for videos, and it applies to videos only.
 
-Where the operating system exposes a true creation/birth timestamp, that value should be used rather than modification time.
+Birth time is preferred where it is genuinely available, with modification time as the fallback:
 
-If no creation/birth time is available, the video must be reported as undated.
+```text
+1. birth/creation time  -> date_source = "filesystem birth time"
+2. modification time    -> date_source = "filesystem mtime"
+```
 
-The application must not silently substitute modification time unless explicitly configured to do so.
+Birth time is frequently unavailable on the target platform, and the implementation must treat that
+as the normal case rather than an error. Linux does not expose birth time through the Python standard
+library, and the underlying value does not exist at all on FAT32/exFAT — the format of most camera SD
+cards — nor on many WSL drive mounts, on NFS, or on older ext4 inodes. A design that required birth
+time would leave a large share of real-world videos undated and therefore never imported.
+
+Because the two are not equally trustworthy, the resolved date source must record **which** timestamp
+was used, so that `filesystem mtime` is visible to the user in the preview and in the final report
+rather than being silently presented as a capture date.
+
+If no filesystem timestamp can be read at all, the video is reported as undated.
 
 ---
 
@@ -304,9 +435,9 @@ The rules can be summarized as follows.
 ### Photos
 
 ```text
-EXIF capture date
+EXIF DateTimeOriginal / CreateDate / DateTime
        │
-       ├── found → use it
+       ├── found and plausible → use it
        │
        └── not found → undated
 ```
@@ -316,7 +447,7 @@ EXIF capture date
 ```text
 Video metadata
        │
-       ├── found → use it
+       ├── found and plausible → use it
        │
        ▼
 Filename date/time
@@ -324,12 +455,20 @@ Filename date/time
        ├── found → use it
        │
        ▼
-Filesystem creation/birth time
+Filesystem birth time
        │
-       ├── found → use it
+       ├── available → use it
        │
-       └── not found → undated
+       ▼
+Filesystem mtime
+       │
+       ├── available → use it
+       │
+       └── not available → undated
 ```
+
+At every metadata tier, "found" means found *and* passing the sanity check in section 6.1. A
+metadata date rejected as garbage falls through to the next tier.
 
 The selected date and its source must be available to the import planner and, preferably, visible in the preview.
 
@@ -535,9 +674,49 @@ A JPEG must not be skipped merely because a matching RAW exists somewhere else i
 Pairing is based on:
 
 - Same source directory
-- Same filename stem
-- One recognized RAW file
-- One JPEG file
+- Same filename stem, compared **case-insensitively** (`IMG_1234.DNG` pairs with `img_1234.jpg`)
+- Exactly one recognized camera RAW file (see 5.1)
+- Exactly one JPEG file (`.jpg` or `.jpeg`)
+
+---
+
+## 12.1 Ambiguous Groups
+
+Pairing applies only to the clean two-file case. Whenever a stem group in a directory is ambiguous,
+**no pairing occurs and every file in the group is imported normally**:
+
+- Two or more RAW files sharing a stem (`IMG_1234.DNG` + `IMG_1234.CR2`) — no way to choose a winner.
+- Both `IMG_1234.JPG` and `IMG_1234.JPEG` present alongside a RAW — two JPEG candidates.
+- A stem group containing three or more files.
+- Any group with no RAW file, or no JPEG file.
+
+Importing both files is the safe failure mode: it wastes disk space, whereas guessing wrong loses a
+photo.
+
+---
+
+## 12.2 The RAW Must Be Importable
+
+A JPEG is suppressed **only when its paired RAW is actually going to be imported**.
+
+If the RAW cannot be dated — its EXIF is missing, or every candidate date is rejected as garbage by
+the sanity check in section 6.1 — then the RAW is undated and, under section 20, will not be copied.
+Suppressing the JPEG in that situation would discard both files and import nothing, even though the
+JPEG may carry perfectly good EXIF of its own.
+
+Therefore:
+
+```text
+RAW resolves to a usable date
+       │
+       ├── yes → import RAW, skip JPEG  (reason: "JPEG paired with RAW")
+       │
+       └── no  → RAW is reported as undated,
+                 pairing is abandoned,
+                 JPEG is dated and imported on its own merits
+```
+
+Both files remain untouched in the source either way.
 
 ---
 
@@ -564,15 +743,101 @@ The importer must safely handle files that already exist in the destination.
 
 It must never silently overwrite an existing file.
 
-At minimum:
+The destination is inspected **only when the computed destination path already exists**. In the
+common case — a path that is free — the file is simply copied. There is no index, no database, and
+no hashing of the library. This keeps a repeat import over a large library cheap, since the vast
+majority of items resolve on a single `stat` of the destination path.
 
-- Destination does not exist → copy file.
-- Destination exists and is identical → report as already imported / skip.
-- Destination exists but differs → report as a conflict.
+```text
+Destination path does not exist
+       │
+       └── → COPY
 
-The implementation should preferably compare file size and/or content hashes to determine whether two files are identical.
+Destination path exists
+       │
+       ├── same file (see 14.1) → SKIP, report as already imported
+       │
+       └── otherwise            → collision, resolved by policy (see 14.2)
+```
 
-Conflicting files must not be overwritten automatically.
+---
+
+## 14.1 Already-Imported Detection
+
+An existing destination file is considered **the same file** when all three of the following match:
+
+```text
+filename                 (identical by construction, since it is the same destination path)
+file size in bytes
+resolved capture datetime
+```
+
+When all three agree, the item is reported as already imported and nothing is copied. The source
+file is left in the import folder untouched, and the user is informed that it was recognized rather
+than silently ignored.
+
+Content hashing is deliberately not used. Size plus resolved capture datetime is sufficient to
+recognize a file the importer itself wrote on a previous run, which is the case this check exists to
+serve.
+
+---
+
+## 14.2 Collisions
+
+A **collision** is any case where a destination path is already occupied by a file that is not the
+same file under 14.1.
+
+Collisions arise in two ways, and both are resolved by the same policy:
+
+1. **Against the library.** The destination path is occupied by a file from an earlier import.
+2. **Within a single import.** Two different source files resolve to the same destination path — for
+   example `/import/cardA/IMG_1234.JPG` and `/import/cardB/IMG_1234.JPG` sharing a capture date.
+   This must be detected at planning time, because the second file would otherwise overwrite the
+   first while both were planned as an unremarkable `COPY`. The planner must therefore track the
+   destination paths it has already assigned within the current plan, not just the paths present on
+   disk when the scan began.
+
+The resolution is chosen by the user through `on_collision`:
+
+### `skip` (default)
+
+Do not import the colliding file. The existing destination file is left exactly as it is, the source
+file is left in the import folder, and the collision is reported. Nothing is ever destroyed.
+
+### `clobber`
+
+One file wins and replaces the other. The winner is chosen by `clobber_prefers`:
+
+```text
+clobber_prefers = "newest"   the later resolved capture datetime wins
+clobber_prefers = "oldest"   the earlier resolved capture datetime wins
+```
+
+Ties are broken by filesystem mtime. If both are still equal, the file already in the library wins
+and the incoming file is skipped, so that a repeated run cannot churn.
+
+When the incoming file wins, it is written atomically — copied to a temporary file in the destination
+directory and then renamed over the target — so the destination is never left in a partially written
+state, and an interrupted clobber cannot destroy the existing file.
+
+### `rename`
+
+Both files are kept. The incoming file receives a numeric suffix on its stem, choosing the lowest
+free index:
+
+```text
+IMG_1234.DNG        already present
+IMG_1234-1.DNG      first colliding import
+IMG_1234-2.DNG      second colliding import
+```
+
+The suffix is applied to the stem, never to the extension, so the file type is preserved.
+
+The chosen policy applies uniformly to both kinds of collision. The default is `skip` because it is
+the only policy that neither destroys existing data nor silently multiplies files.
+
+Whichever policy applies, the source file is never modified, moved, renamed, or deleted, and every
+collision is recorded in the final report.
 
 ---
 
@@ -653,33 +918,37 @@ Import summary
 Source:
   /mnt/import
 
-Photos:
-  1,248
+Discovered media:
+  1,335
 
-Videos:
-  87
+  Photos:                    1,248
+  Videos:                       87
 
-RAW + JPEG pairs:
-  312 JPEGs skipped
-
-Already imported:
-  42
-
-Undated:
-  3
-
-Conflicts:
-  1
+Not importing:
+  RAW + JPEG pairs:            312   (JPEGs skipped)
+  Already imported:             42
+  Undated:                       3
+  Collisions:                    1
 
 Files to import:
-  978
+  977
 
 Proceed with import? [Y/n]
 ```
 
+The categories must **partition** the set of discovered media: every discovered file falls into
+exactly one of them, and the counts must reconcile exactly.
+
+```text
+1,248 + 87 = 1,335 discovered
+1,335 − 312 − 42 − 3 − 1 = 977 to import
+```
+
 The user must explicitly confirm before files are copied.
 
-The preview should make it possible to identify problematic files before starting the import.
+The preview should make it possible to identify problematic files before starting the import. Counts
+alone are not enough for the exception categories: the user must be able to see the **paths** of the
+undated files and the collisions, since those are the items that need action.
 
 ---
 
@@ -724,11 +993,15 @@ The importer should continue processing other files.
 The final report must include:
 
 - Successfully imported files
-- Already-existing files
+- Already-imported files
 - Skipped RAW/JPEG files
 - Undated files
-- Conflicts
+- Collisions, with the policy that was applied to each
+- Ignored symlinks
 - Failed files
+
+For every category other than successful imports, the report must list the **paths** involved, not
+just a count. A bare count tells the user that something needs attention without telling them what.
 
 Fatal errors, such as an inaccessible source directory or unavailable destination library, should abort the import with a clear error.
 
@@ -816,14 +1089,53 @@ This separation is important because the destination organization is configurabl
 
 - **Language:** Python
 - **Interface:** Terminal User Interface (TUI)
-- **Configuration:** Persistent configuration stored in the user's home directory
-- **Metadata:** Appropriate Python metadata libraries and/or external metadata tools
+- **Configuration:** Persistent TOML configuration under `~/.config/`
+- **Metadata:** `exiftool` and `ffprobe`, invoked as external tools
 - **Filesystem:** Python filesystem APIs
 - **Backend:** None
-- **Database:** None required
-- **Operating system:** Linux
+- **Database:** None
+- **Operating system:** Linux and WSL
 
 The application should be designed as a local standalone utility.
+
+---
+
+## 22.1 External Tool Dependencies
+
+Metadata extraction relies on two external programs rather than on pure-Python parsers, because
+neither EXIF across every RAW variant nor container metadata across every video format is handled
+adequately by any pip-installable library.
+
+```text
+exiftool   photo and RAW metadata
+ffprobe    video container metadata (shipped with ffmpeg)
+```
+
+These are **not** Python packages and cannot be installed by `pip`. The application must therefore:
+
+- Detect at startup whether each tool is present on `PATH`.
+- Report a clear, actionable error naming the missing tool and the install command for the user's
+  distribution, rather than failing obscurely when the first file is read.
+- Treat a missing tool as a fatal error, since date resolution is the core of the application.
+
+Installation must be documented for the major distributions:
+
+```bash
+# Debian / Ubuntu / WSL
+sudo apt install libimage-exiftool-perl ffmpeg
+
+# Fedora
+sudo dnf install perl-Image-ExifTool ffmpeg-free
+
+# Arch
+sudo pacman -S perl-image-exiftool ffmpeg
+```
+
+On Fedora, `ffmpeg-free` from the main repositories provides `ffprobe`; the RPM Fusion `ffmpeg`
+package also works and supports more codecs.
+
+Because this dependency cannot be expressed in a PyPI wheel, the README must state the requirement
+prominently in its installation section.
 
 ---
 
@@ -841,9 +1153,14 @@ The initial version does not need to:
 - Upload media
 - Synchronize destination changes back to the source
 - Infer dates from source directory names
-- Use filesystem timestamps for photos when valid EXIF data exists
-- Automatically use filesystem modification time as a fallback
+- Use filesystem timestamps for photos at all, in any circumstance
+- Use the filename to date a photo
+- Follow symlinks
+- Hash or index the destination libraries
 - Provide manual date correction
+
+Note that filesystem modification time **is** a sanctioned last-resort fallback for videos (see 8.3).
+It is never used for photos.
 
 ---
 

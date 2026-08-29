@@ -16,7 +16,7 @@ The application must:
 - Organize destination files using a configurable date path scheme.
 - Never modify the source media.
 - Be safe to run repeatedly.
-- Be distributable through PyPI and Conda.
+- Be distributable through PyPI.
 
 ---
 
@@ -39,14 +39,14 @@ Use a modern `src/` package layout.
 Recommended structure:
 
 ```text
-photo-import/
+media-importer/
 ├── pyproject.toml
 ├── README.md
-├── LICENSE
+├── LICENSE          (MIT)
 ├── Makefile
 ├── .gitignore
 ├── src/
-│   └── <package_name>/
+│   └── media_importer/
 │       ├── __init__.py
 │       ├── __main__.py
 │       ├── cli.py
@@ -73,12 +73,30 @@ photo-import/
 │   ├── test_planner.py
 │   ├── test_importer.py
 │   └── fixtures/
-└── packaging/
-    └── conda/
-        └── meta.yaml
+└── .github/
+    └── workflows/
 ```
 
 The exact module names may differ, but the separation of responsibilities should be maintained.
+
+## 3.1 Naming
+
+These names are authoritative and must be used consistently:
+
+```text
+distribution / PyPI name   media-importer
+import package             media_importer
+console script             media-importer
+config directory           ~/.config/media-importer/
+```
+
+## 3.2 License
+
+The project is licensed **MIT**.
+
+A `LICENSE` file containing the MIT text must be present at the repository root, and the same license
+must be declared in `pyproject.toml` so it reaches the built package metadata. These are the only two
+places the license is recorded — do not restate it elsewhere.
 
 ---
 
@@ -90,19 +108,19 @@ For example:
 
 ```toml
 [project.scripts]
-photo-import = "photo_import.cli:main"
+media-importer = "media_importer.cli:main"
 ```
 
 The application must therefore be runnable as:
 
 ```bash
-photo-import
+media-importer
 ```
 
 It must also support:
 
 ```bash
-python -m photo_import
+python -m media_importer
 ```
 
 Both entry points must launch the same application.
@@ -131,45 +149,80 @@ This ensures that the core functionality can be tested without running the TUI.
 
 # 6. Configuration
 
-Use a human-readable configuration file stored in the user's home configuration directory.
-
-Preferred location:
+Use a human-readable configuration file stored in the user's XDG configuration directory:
 
 ```text
-~/.config/<application-name>/config.toml
+~/.config/media-importer/config.toml
 ```
 
-Use a suitable TOML library or Python's built-in TOML support where available.
+Honour `$XDG_CONFIG_HOME` when it is set, falling back to `~/.config` otherwise.
+
+Read TOML with the standard library `tomllib` (Python 3.11+). Writing requires a third-party
+library such as `tomli-w`, since `tomllib` is read-only.
 
 Configuration must contain:
 
 ```toml
-source_path = "/path/to/import"
-photo_library = "/path/to/photos"
-video_library = "/path/to/videos"
-import_path = "YYYY/MM/DD"
+source_path      = "/path/to/import"
+photo_library    = "/path/to/photos"
+video_library    = "/path/to/videos"
+import_path      = "YYYY/MM/DD"
+on_collision     = "skip"
+clobber_prefers  = "newest"
 ```
 
 The application must create the configuration directory and default configuration when required.
+
+Unknown keys should be preserved on rewrite rather than silently dropped, so that a config written
+by a newer version is not destroyed by an older one.
 
 ---
 
 # 7. Configuration Model
 
-Represent configuration using a typed Python model/dataclass.
-
-At minimum:
+Represent configuration using a typed Python model/dataclass:
 
 ```text
-source_path
-photo_library
-video_library
-import_path
+source_path      Path
+photo_library    Path
+video_library    Path
+import_path      str
+on_collision     CollisionPolicy   enum: SKIP | CLOBBER | RENAME
+clobber_prefers  ClobberPreference enum: NEWEST | OLDEST
 ```
+
+`on_collision` and `clobber_prefers` must be parsed into enums at load time, not carried as raw
+strings. An unrecognized value is a `ConfigurationError`, not a silent fallback to the default.
+
+This is the complete v1 schema. Supported media extensions are **not** configurable in v1; they are
+defined in code (section 10). If that changes later, the extension sets move here rather than being
+read ad hoc from elsewhere.
 
 Configuration loading and validation must be centralized in the configuration module.
 
 The rest of the application should consume a validated configuration object rather than parsing TOML directly.
+
+---
+
+## 7.1 Path Nesting Validation
+
+Configuration validation must reject a nesting relationship between the three configured paths.
+
+Resolve each path with `Path.resolve()` first, so that symlinked indirection cannot defeat the check,
+then compare using `Path.is_relative_to()` in both directions:
+
+```python
+def _assert_not_nested(a: Path, b: Path) -> None:
+    if a.is_relative_to(b) or b.is_relative_to(a):
+        raise ConfigurationError(...)
+```
+
+Check `source_path` against `photo_library`, and `source_path` against `video_library`.
+`photo_library` and `video_library` may be equal to one another, but neither may contain the other
+unless they are equal.
+
+A nested configuration makes the scanner rediscover files the importer just wrote. Raise
+`ConfigurationError` before scanning begins, naming both offending paths.
 
 ---
 
@@ -212,10 +265,22 @@ Unknown
 and:
 
 ```text
-Copy
-Skip
-Conflict
-Error
+COPY
+SKIP              already imported, or JPEG paired with RAW
+COLLISION         destination occupied by a different file
+UNDATED           no usable date, not importable
+ERROR
+```
+
+`reason` must distinguish the several causes that share the `SKIP` action, so the report can break
+them out separately:
+
+```text
+ALREADY_IMPORTED
+JPEG_PAIRED_WITH_RAW
+COLLISION_SKIPPED
+SYMLINK
+UNSUPPORTED_EXTENSION
 ```
 
 This avoids passing loosely structured strings throughout the application.
@@ -246,10 +311,31 @@ It must not:
 - Copy files
 - Modify files
 - Make import decisions
+- Follow symlinks
 
 Use Python's `pathlib` APIs.
 
 The scanner should handle large directory trees without unnecessarily loading file contents into memory.
+Prefer `os.scandir` semantics (which `Path.iterdir` uses) and yield results lazily rather than
+materializing the whole tree.
+
+## 9.1 Symlink Handling
+
+Symlinks are skipped, both directories and files.
+
+Use `Path.is_symlink()` — note that `Path.is_dir()` and `Path.is_file()` follow links and will
+therefore not identify one. Check `is_symlink()` **first**:
+
+```python
+if entry.is_symlink():
+    yield Ignored(entry, reason=IgnoreReason.SYMLINK)
+    continue
+```
+
+Not descending into symlinked directories also removes any possibility of an infinite scan through a
+symlink loop, so no separate cycle detection or visited-inode set is required.
+
+Ignored symlinks must be reported as their own category, distinct from unsupported extensions.
 
 ---
 
@@ -266,38 +352,43 @@ Maintain centralized sets/maps of supported extensions.
 Example:
 
 ```python
-PHOTO_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".tif",
-    ".tiff",
-    ".dng",
-    ".cr2",
-    ".cr3",
-    ".nef",
-    ".orf",
-    ".rw2",
-    ".arw",
+# Camera manufacturer raw formats. This set exists only to drive
+# RAW/JPEG pairing (section 17). TIFF is deliberately NOT here.
+RAW_EXTENSIONS = {
+    ".dng", ".cr2", ".cr3", ".nef", ".nrw", ".arw",
+    ".orf", ".rw2", ".raf", ".pef", ".srw", ".rwl",
+    ".erf", ".3fr", ".iiq", ".x3f", ".mef", ".mos",
+    ".kdc", ".dcr",
 }
+
+JPEG_EXTENSIONS = {".jpg", ".jpeg"}
+
+PHOTO_EXTENSIONS = {
+    ".png",
+    ".tif", ".tiff",
+    ".heic", ".heif",
+    ".webp",
+} | JPEG_EXTENSIONS | RAW_EXTENSIONS
 ```
 
 and:
 
 ```python
 VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".mov",
-    ".m4v",
-    ".avi",
-    ".mpg",
-    ".mpeg",
-    ".mts",
-    ".3gp",
+    ".mp4", ".mov", ".m4v", ".avi",
+    ".mpg", ".mpeg", ".mts", ".3gp",
+    ".mkv", ".webm", ".insv",
 }
 ```
 
-The exact list should be easy to extend.
+`RAW_EXTENSIONS` and `JPEG_EXTENSIONS` are subsets of `PHOTO_EXTENSIONS`, never separate
+classification categories: a RAW file classifies as `Photo`, and the RAW subset is consulted only by
+the pairing stage.
+
+HEIC/HEIF must be present — it has been the iPhone default since 2017 and is the single most likely
+extension to be encountered when importing from a phone.
+
+Match on `path.suffix.lower()`. The exact lists should be easy to extend.
 
 ---
 
@@ -305,29 +396,46 @@ The exact list should be easy to extend.
 
 Metadata extraction must be isolated behind an abstraction.
 
-The application should use appropriate established libraries/tools rather than implementing media metadata parsing itself.
+The application shells out to two established external tools rather than parsing media metadata
+itself:
 
-The metadata abstraction should expose normalized values.
+```text
+exiftool   photos and RAW    exiftool -json -DateTimeOriginal -CreateDate -DateTime <file>
+ffprobe    videos            ffprobe -v quiet -print_format json -show_format -show_streams <file>
+```
 
-For example:
+Both emit JSON, so neither needs output scraping. Invoke them with `subprocess.run` using an argument
+list — never `shell=True`, since filenames are untrusted input — and always apply a timeout so a
+malformed file cannot hang the import.
+
+## 11.1 Tool Availability
+
+Both tools must be probed once at startup via `shutil.which`. A missing tool is a fatal
+`ConfigurationError` naming the tool and the install command for the user's distribution, raised
+before scanning rather than on the first file read.
+
+Because these are not Python packages, `pip install` cannot supply them. See section 41 for the
+per-distribution install instructions that the README must carry.
+
+## 11.2 Batching
+
+`exiftool` startup cost dominates per-file runtime, so invoking it once per file makes a large import
+needlessly slow. Prefer passing many files to a single invocation, or use its `-stay_open` mode, and
+correlate results by the `SourceFile` field in the JSON output.
+
+## 11.3 Normalized Result
+
+The abstraction exposes normalized values, never tool-specific structures:
 
 ```python
 Metadata(
-    capture_datetime=...,
-    source="exif",
+    capture_datetime=...,   # naive or aware datetime, or None
+    source="exif:DateTimeOriginal",
 )
 ```
 
-or:
-
-```python
-Metadata(
-    capture_datetime=...,
-    source="video_metadata",
-)
-```
-
-The date resolver must not depend on the implementation details of the metadata extraction library.
+The date resolver must not depend on the implementation details of either tool, so that a future
+switch to a pure-Python backend touches only this module.
 
 ---
 
@@ -335,15 +443,18 @@ The date resolver must not depend on the implementation details of the metadata 
 
 Implement a dedicated photo date resolver.
 
-Resolution priority:
+Resolution priority — an ordered, closed list:
 
 ```text
-EXIF DateTimeOriginal
-        ↓
-other supported EXIF capture-date fields
+1. EXIF DateTimeOriginal   (0x9003)
+2. EXIF CreateDate         (DateTimeDigitized, 0x9004)
+3. EXIF DateTime           (ModifyDate, 0x0132)
         ↓
 undated
 ```
+
+The first field yielding a value that passes the sanity check in section 13.1 wins. The list is
+closed rather than open-ended so that photo dating is deterministic and testable.
 
 Do not use:
 
@@ -351,7 +462,8 @@ Do not use:
 - Filesystem modification time
 - Filesystem creation time
 
-as photo date fallbacks unless explicitly added as a future feature.
+as photo date fallbacks. Unlike video containers, EXIF is consistent enough to rely on, and this
+restriction is a deliberate product decision rather than a temporary limitation.
 
 The resolver must return:
 
@@ -372,13 +484,19 @@ Implement a separate video date resolver.
 Resolution priority:
 
 ```text
-1. Embedded metadata
+1. Embedded metadata      (ffprobe, sanity-checked)
 2. Filename date/time
-3. Filesystem birth/creation time
-4. Undated
+3. Filesystem birth time  (where genuinely available)
+4. Filesystem mtime
+5. Undated
 ```
 
-The resolver must stop at the first reliable date.
+The resolver must stop at the first reliable date, where "reliable" for tier 1 means the value also
+passes the sanity check below. A rejected metadata date falls through to tier 2 exactly as if the
+field had been absent.
+
+Implementation effort belongs in tiers 1 and 2. Tiers 3 and 4 describe the file, not the recording,
+and exist only so a video is not lost.
 
 It must return both:
 
@@ -386,6 +504,47 @@ It must return both:
 resolved datetime
 date source
 ```
+
+`date_source` must distinguish `filesystem birth time` from `filesystem mtime`, since the two carry
+very different confidence and the user needs to see which was used.
+
+---
+
+## 13.1 Metadata Date Sanity Check
+
+Implement the plausibility check as a standalone, independently testable function shared by both
+resolvers. Real files routinely carry `1904-01-01` (the QuickTime epoch), `1970-01-01`, and the
+all-zero EXIF value `0000:00:00 00:00:00`.
+
+```python
+FLOOR = datetime(1990, 1, 1)
+CEILING_SLACK = timedelta(days=730)  # 2 years
+
+def is_plausible(candidate: datetime, mtime: datetime) -> bool:
+    return FLOOR <= candidate <= mtime + CEILING_SLACK
+```
+
+A candidate is garbage when it is unparseable, falls below `FLOOR`, or falls more than two years
+after the file's mtime.
+
+The ceiling is deliberately asymmetric. A capture date *older* than mtime is normal, because copying
+a file updates mtime while the capture date stays put — so an archival import of genuinely old media
+keeps its correct dates. A capture date meaningfully *newer* than mtime is physically impossible.
+
+```text
+floor   = 1990-01-01
+ceiling = mtime + 2 years
+
+EXIF 1904-01-01                    -> garbage (below floor)
+EXIF 0000:00:00 00:00:00           -> garbage (unparseable)
+EXIF 2015-06-02, mtime 2024-01-10  -> accepted
+EXIF 2031-01-01, mtime 2025-08-29  -> garbage (future)
+```
+
+Applies to metadata dates only. Filename and filesystem dates are bounded by construction.
+
+Compare naive to naive: if a metadata value carries a timezone, normalize it before comparing
+against mtime, which is naive local.
 
 ---
 
@@ -421,23 +580,39 @@ Filename matching should avoid interpreting arbitrary numeric sequences as dates
 
 # 15. Filesystem Birth Time
 
-For video fallback handling, implement a filesystem birth/creation-time abstraction.
+For video fallback handling, implement a filesystem timestamp abstraction that prefers birth time and
+falls back to mtime.
 
-The implementation must use the best available Linux filesystem API.
+**Birth time is not reachable from the Python standard library on Linux.** `os.stat()` exposes no
+`st_birthtime` there — that attribute exists only on macOS/BSD and, since 3.12, Windows — and there
+is no `os.statx` binding. Obtaining it requires a `ctypes` `statx(2)` call requesting `STATX_BTIME`,
+and then checking the returned mask to see whether the kernel actually supplied it.
 
-On systems where true birth time is unavailable, return an explicit unavailable result.
-
-Do not silently substitute:
+Even with that call, the value is frequently absent:
 
 ```text
-mtime
+FAT32 / exFAT     no btime          <- the format of most camera SD cards
+WSL DrvFs / 9p    usually no btime
+NFS               generally no btime
+ext4              absent on inodes created before ~2011
 ```
 
-for birth time.
+The abstraction must therefore return an explicit three-state result rather than a bare datetime:
 
-WSL compatibility must be considered.
+```python
+BirthTime(value=..., available=True)
+BirthTime(value=None, available=False)
+```
 
-The behavior when the underlying filesystem does not expose birth time must be documented.
+The resolver then falls back to mtime and records `date_source = "filesystem mtime"`. This is a
+sanctioned fallback, not a silent substitution: the distinction is preserved all the way through to
+the preview and the final report, so the user can always tell which timestamp dated a file.
+
+A design that required true birth time would leave most camera-card video undated and therefore never
+imported, which is why mtime is accepted here.
+
+The README must document this behaviour and note that on most Linux filesystems video dating will
+fall through to mtime whenever metadata and filename both fail.
 
 ---
 
@@ -465,30 +640,54 @@ Timezone conversion should therefore not be performed unless required by the met
 
 Implement RAW/JPEG pairing as a separate processing stage.
 
-A pair exists when:
+A pair exists when all of the following hold:
 
 ```text
 same parent directory
-same filename stem
-one RAW file
-one JPEG/JPG file
+same filename stem, compared case-insensitively
+exactly one file whose extension is in RAW_EXTENSIONS
+exactly one file whose extension is in JPEG_EXTENSIONS
 ```
 
-The RAW file takes precedence.
+Group by `(parent, stem.lower())`. Case-insensitive stem matching means `IMG_1234.DNG` pairs with
+`img_1234.jpg`.
 
-The resulting import plan must mark the JPEG as:
+TIFF is not RAW, so a `.tif` beside a `.jpg` is not a pair and both are imported.
+
+## 17.1 Ambiguous Groups
+
+Pairing applies only to the clean two-file case. If a group is ambiguous, **no pairing occurs and
+every member is imported normally**:
+
+- Two or more RAW files sharing a stem (`IMG_1234.DNG` + `IMG_1234.CR2`)
+- Both `.jpg` and `.jpeg` present alongside a RAW
+- Three or more files in the group
+- No RAW, or no JPEG
+
+Importing both is the safe failure mode: it costs disk space, whereas guessing wrong loses a photo.
+
+## 17.2 Pairing Requires an Importable RAW
+
+The JPEG is suppressed **only when the RAW will actually be imported**.
+
+Pairing must therefore run *after* date resolution, not before it. If the RAW resolves to undated —
+no EXIF, or every candidate rejected by the sanity check — then suppressing the JPEG would discard
+both files and import nothing, even though the JPEG may carry good EXIF of its own.
 
 ```text
-SKIP
+RAW resolved date is usable
+       │
+       ├── yes → RAW: COPY
+       │         JPEG: SKIP, reason JPEG_PAIRED_WITH_RAW
+       │
+       └── no  → RAW: UNDATED (reported)
+                 JPEG: dated and imported on its own merits
 ```
 
-with a reason such as:
+This ordering constraint is the reason the planner sequence in section 21 resolves dates before
+detecting pairs.
 
-```text
-JPEG paired with RAW
-```
-
-The JPEG must remain untouched.
+The JPEG must remain untouched in the source in every case.
 
 Pair detection must occur before import execution.
 
@@ -583,14 +782,22 @@ must not result in writes outside the destination library.
 
 The planner is responsible for converting discovered media into a complete import plan.
 
-It should:
+It should, in this order:
 
 1. Classify files.
 2. Resolve dates.
 3. Detect RAW/JPEG pairs.
 4. Generate destination paths.
 5. Check destination state.
-6. Determine the action.
+6. Detect in-plan destination collisions.
+7. Determine the action.
+
+Steps 2 and 3 must not be reordered: pairing needs to know whether the RAW resolved to a usable date
+(section 17.2).
+
+Step 6 requires the planner to maintain a map of destination paths it has already assigned during
+this plan, so that two source files targeting the same destination are caught even though neither
+conflicts with anything on disk. See section 23.1.
 
 The planner must not copy files.
 
@@ -639,6 +846,10 @@ action:
 
 Before planning a copy, inspect whether the destination already exists.
 
+The check is a single `stat` on the destination path. In the common case the path is free and the
+item is planned `COPY` with no further work. There is **no index, no database, and no hashing of the
+library** — a repeat import over a large library must not read the contents of files it already has.
+
 Cases:
 
 ### Missing
@@ -647,26 +858,98 @@ Cases:
 COPY
 ```
 
-### Existing and identical
+### Existing and the same file
 
 ```text
-SKIP
+SKIP   reason = ALREADY_IMPORTED
 ```
+
+Two files are the same when **all three** of these match:
+
+```text
+filename                  (identical by construction — same destination path)
+size in bytes
+resolved capture datetime
+```
+
+Size plus resolved capture datetime is enough to recognize a file this importer wrote on an earlier
+run, which is the only case this check needs to serve. The source file stays in the import folder,
+untouched, and the user is told it was recognized rather than silently passed over.
 
 ### Existing and different
 
 ```text
-CONFLICT
+COLLISION   resolved by the configured policy (section 23.2)
 ```
 
-The implementation should use an efficient comparison strategy.
+### Existing but a symlink
 
-A suitable strategy is:
+```text
+ERROR
+```
 
-1. Compare file size.
-2. If sizes match, compare content using a hash or equivalent mechanism.
+Never overwrite, clobber, or rename a symlink in the destination. Report and continue.
 
-Avoid hashing large files unnecessarily when file size already differs.
+---
+
+## 23.1 In-Plan Collisions
+
+A destination path can also be claimed twice within a single import — two cards, two cameras, or a
+reused card producing `/import/a/IMG_1234.JPG` and `/import/b/IMG_1234.JPG` with the same capture
+date.
+
+Checking only the on-disk state misses this entirely: both items would be planned `COPY` to the same
+path, and the second copy would silently destroy the first, violating the never-overwrite rule while
+reporting two clean successes.
+
+The planner must therefore keep a `dict[Path, PlanItem]` of destinations assigned so far. A second
+claim on the same destination is a collision and goes through the same policy as an on-disk one.
+
+Note also that the destination state observed at plan time goes stale as the executor runs. The
+executor must not re-derive decisions, but it must still perform the copy itself in a way that cannot
+clobber a file that appeared in the meantime (section 25).
+
+---
+
+## 23.2 Collision Policy
+
+Driven by `on_collision`, applied identically to on-disk and in-plan collisions.
+
+### `skip` (default)
+
+Plan `SKIP` with reason `COLLISION_SKIPPED`. The existing file is untouched, the source file stays in
+the import folder, the collision is reported. Nothing is destroyed.
+
+### `clobber`
+
+One file wins, by `clobber_prefers`:
+
+```text
+"newest"   later resolved capture datetime wins
+"oldest"   earlier resolved capture datetime wins
+```
+
+Tie-break on mtime. If still tied, the incumbent wins and the incoming file is skipped — this makes
+repeated runs stable instead of rewriting the same file every time.
+
+A winning incoming file must be written through the atomic temp-and-rename path in section 25, so an
+interrupted clobber cannot leave the destination truncated or missing.
+
+### `rename`
+
+Keep both. Suffix the incoming file's **stem**, never the extension, choosing the lowest free index:
+
+```text
+IMG_1234.DNG      existing
+IMG_1234-1.DNG    first colliding import
+IMG_1234-2.DNG    second colliding import
+```
+
+Index selection must consult both the filesystem and the in-plan destination map, or two colliding
+items in one run will both choose `-1`.
+
+`skip` is the default because it is the only policy that neither destroys existing data nor silently
+multiplies files.
 
 ---
 
@@ -705,6 +988,21 @@ atomic rename to final destination
 
 The implementation must ensure that a partially copied file is not mistaken for a successfully imported file on the next run.
 
+Concretely:
+
+- The temporary file must be created **in the destination directory**, not in `/tmp`. `os.rename` is
+  only atomic within a single filesystem, and the library is very often on a different mount than
+  the system temp directory.
+- Give temporaries a recognizable prefix (e.g. `.<name>.partial-<pid>`), and sweep stale ones from
+  the destination directory at the start of a run. An interrupted run otherwise leaves debris that a
+  later scan of that tree would see as a real file.
+- For a `COPY` to a path expected to be free, create the final file with `O_EXCL` semantics, or
+  re-check immediately before the rename. This closes the window between the planner's `stat` and
+  the executor's write, during which another process — or another item in the same plan — could have
+  created the file.
+- Use `shutil.copy2` so mtime is preserved on the imported copy. Downstream tools read library file
+  timestamps, and `copy` would reset them all to import time.
+
 ---
 
 # 26. Import Progress
@@ -735,9 +1033,16 @@ Examples:
 ConfigurationError
 MetadataError
 DateResolutionError
-DestinationConflict
-ImportError
+DestinationCollision
+MediaImportError
 ```
+
+Do **not** name an exception `ImportError`. That shadows a Python builtin, and a bare
+`except ImportError:` anywhere in the codebase or in a dependency would then catch application errors
+alongside genuine module-import failures. Use `MediaImportError`.
+
+All application exceptions should derive from a single package-level base class so callers can catch
+the whole family.
 
 Individual file failures should not normally abort the entire import.
 
@@ -840,21 +1145,58 @@ At minimum:
 
 Test all supported tokens and representative schemes.
 
+### Metadata sanity check
+
+- `1904-01-01` rejected (below floor)
+- `0000:00:00 00:00:00` rejected (unparseable)
+- Capture far older than mtime accepted (archival import)
+- Capture more than 2 years after mtime rejected
+- A rejected metadata date falls through to the next tier rather than making the file undated
+
+### Config validation
+
+- `photo_library` inside `source_path` rejected
+- `source_path` inside `video_library` rejected
+- Nesting via a symlink still rejected (paths resolved first)
+- `photo_library == video_library` accepted
+- Unknown `on_collision` / `clobber_prefers` value raises `ConfigurationError`
+
+### Symlinks
+
+- Symlinked file not imported
+- Symlinked directory not descended
+- Symlink loop does not hang the scan
+- Symlink in the destination is never overwritten
+
 ### Planner
 
 - Copy
 - Skip
-- Conflict
+- Collision
 - Undated
 - RAW/JPEG skip
+- Two source files resolving to one destination path (in-plan collision)
+- Path traversal: a hostile filename cannot escape the library root
+
+### Collision policy
+
+- `skip` leaves both files untouched
+- `clobber` + `newest` replaces the older file
+- `clobber` + `oldest` keeps the incumbent
+- `clobber` tie on capture date falls through to mtime, then to incumbent
+- `rename` picks the lowest free index
+- `rename` with two in-plan collisions does not assign `-1` twice
 
 ### Importer
 
 - Successful copy
-- Existing identical file
-- Existing conflicting file
+- Existing identical file (same size + same resolved date) skipped
+- Existing colliding file
 - Destination creation
 - Interrupted/partial copy handling
+- Stale `.partial` temporary files swept before a run
+- mtime preserved on the copied file
+- End-to-end idempotency: a second run over the same source copies zero files
 
 ---
 
@@ -964,54 +1306,27 @@ Publishing targets should fail with a clear error when required credentials are 
 
 ---
 
-# 37. Conda Packaging
+# 37. Conda Packaging — Out of Scope for v1
 
-Provide a Conda package recipe.
+Conda packaging is **deferred**. v1 ships through PyPI and from source only.
 
-Recommended:
+The recipe would be a second set of package metadata to keep version-synced with `pyproject.toml`,
+and `conda-build` is not itself pip-installable into the development environment, so it adds a
+parallel toolchain for no v1 benefit.
 
-```text
-packaging/
-└── conda/
-    └── meta.yaml
-```
+If it is added later, it belongs at `packaging/conda/meta.yaml`, must derive its version from the
+single source of truth in section 44 rather than restating it, and must declare `exiftool` and
+`ffmpeg` as runtime dependencies — something conda can express and a PyPI wheel cannot, which is the
+main argument for eventually doing it.
 
-The recipe must contain:
-
-- Package name
-- Version
-- Source
-- Build requirements
-- Runtime requirements
-- Entry point
-- License
-- Metadata
-
-The recipe must install the same Python application as the PyPI package.
+Nothing in v1 may be structured in a way that blocks this later.
 
 ---
 
-# 38. Conda Publishing
+# 38. Conda Publishing — Out of Scope for v1
 
-Provide:
-
-```bash
-make publish-conda
-```
-
-The target must build and publish the Conda package using standard Conda tooling.
-
-Credentials must come from environment variables.
-
-For example:
-
-```bash
-export ANACONDA_API_TOKEN="..."
-```
-
-No credentials may be committed to the repository.
-
-The target should fail clearly when credentials are missing.
+Deferred along with section 37. There is no `make publish-conda` target in v1 and no
+`ANACONDA_API_TOKEN`.
 
 ---
 
@@ -1032,7 +1347,6 @@ make build
 make package
 make publish-testpypi
 make publish-pypi
-make publish-conda
 ```
 
 Suggested semantics:
@@ -1067,9 +1381,6 @@ publish-testpypi
 
 publish-pypi
     Build and publish to PyPI.
-
-publish-conda
-    Build and publish the Conda package.
 ```
 
 Publishing should depend on successful tests/builds where appropriate.
@@ -1118,27 +1429,43 @@ Including:
 
 ## Requirements
 
-Supported Python version and operating systems.
+Supported Python version and operating systems (Linux and WSL).
+
+### External tools
+
+`exiftool` and `ffprobe` must be installed and on `PATH`. They are not Python packages, so `pip`
+cannot install them, and the application will refuse to start without them.
+
+```bash
+# Debian / Ubuntu / WSL
+sudo apt install libimage-exiftool-perl ffmpeg
+
+# Fedora
+sudo dnf install perl-Image-ExifTool ffmpeg-free
+
+# Arch
+sudo pacman -S perl-image-exiftool ffmpeg
+```
+
+`ffprobe` ships inside the `ffmpeg` package. On Fedora, `ffmpeg-free` from the main repositories
+provides it; the RPM Fusion `ffmpeg` build also works and covers more codecs.
+
+This requirement must appear prominently, before the install commands below, since a PyPI wheel
+cannot express it.
 
 ## Installation
 
 PyPI:
 
 ```bash
-python3 -m pip install <package-name>
-```
-
-Conda:
-
-```bash
-conda install -c <channel> <package-name>
+python3 -m pip install media-importer
 ```
 
 From source:
 
 ```bash
 git clone <repository>
-cd <repository>
+cd media-importer
 make install
 ```
 
@@ -1147,7 +1474,7 @@ make install
 Explain how to launch:
 
 ```bash
-photo-import
+media-importer
 ```
 
 and how the TUI works.
@@ -1173,14 +1500,24 @@ with examples.
 
 Document:
 
-- Photo EXIF priority
+- Photo EXIF priority, and that photos never fall back to filename or filesystem time
 - Video metadata priority
 - Filename fallback
-- Filesystem creation-time fallback
+- Filesystem birth-time fallback, and that it degrades to mtime on most Linux filesystems
+- The plausibility check that rejects implausible metadata dates
+
+## Collision Handling
+
+Document `on_collision` (`skip` / `clobber` / `rename`) and `clobber_prefers`, with an example of
+each, and note that `skip` is the default because it never destroys data.
 
 ## RAW/JPEG Handling
 
-Explain that the RAW is imported and the paired JPEG is left untouched.
+Explain that the RAW is imported and the paired JPEG is left untouched, that only camera RAW formats
+count (TIFF does not), and that an undated RAW does not suppress its JPEG.
+
+Note that Apple Live Photos (`.HEIC` + `.MOV`) are not pairs and are deliberately split across the
+two libraries.
 
 ## Development
 
@@ -1210,10 +1547,9 @@ Document:
 ```bash
 make publish-testpypi
 make publish-pypi
-make publish-conda
 ```
 
-and the required environment variables.
+and the required environment variables (`TWINE_USERNAME`, `TWINE_PASSWORD`).
 
 ---
 
@@ -1249,40 +1585,44 @@ Publishing should not happen automatically unless explicitly configured for rele
 
 The project must have a single authoritative package version.
 
+Define it once, in `pyproject.toml`, and read it at runtime with
+`importlib.metadata.version("media-importer")`. Do not maintain a second hand-edited `__version__`
+string that can drift out of sync.
+
 The version must be available to:
 
 - Python package metadata
 - PyPI build
-- Conda recipe
-- Application if displayed by the CLI/TUI
-
-Avoid maintaining multiple independently edited version strings where possible.
+- The application, for display in the TUI
 
 ---
 
 # 45. Distribution Consistency
 
-The PyPI and Conda packages must expose the same application and console command.
+Installing from PyPI or from source must expose the same application and console command.
 
-For example, both:
+Both:
 
 ```bash
-pip install <package-name>
+pip install media-importer
 ```
 
 and:
 
 ```bash
-conda install -c <channel> <package-name>
+git clone <repository> && cd media-importer && make install
 ```
 
 must result in:
 
 ```bash
-photo-import
+media-importer
 ```
 
-being available.
+being available on `PATH`, and in `python -m media_importer` launching the same application.
+
+Neither install path supplies `exiftool` or `ffprobe`; both rely on the distribution packages
+documented in section 11.1.
 
 ---
 
@@ -1309,7 +1649,6 @@ followed by:
 
 ```bash
 make publish-pypi
-make publish-conda
 ```
 
 TestPyPI should be available for validating a release before publishing to the production PyPI repository.
@@ -1321,6 +1660,7 @@ TestPyPI should be available for validating a release before publishing to the p
 The implementation must not:
 
 - Require a database
+- Require an index or content hashing of the destination libraries
 - Require a backend service
 - Require Docker
 - Require a graphical desktop environment
@@ -1332,6 +1672,11 @@ The implementation must not:
 
 The application must remain usable entirely from a Linux/WSL terminal.
 
+`exiftool` and `ffprobe` are a deliberate exception to the "no external dependencies" spirit of this
+list. They are ordinary distribution packages rather than services, and no pip-installable library
+covers EXIF across every RAW variant and container metadata across every video format well enough to
+replace them.
+
 ---
 
 # 48. Definition of Done
@@ -1339,16 +1684,21 @@ The application must remain usable entirely from a Linux/WSL terminal.
 The implementation is considered complete when:
 
 - The application can be installed from PyPI.
-- The application can be installed from Conda.
 - The application can be installed from source.
-- `photo-import` launches the TUI.
+- `media-importer` launches the TUI, and so does `python -m media_importer`.
+- A missing `exiftool` or `ffprobe` produces a clear startup error naming the install command.
 - Configuration persists between runs.
 - The source directory is recursively scanned.
 - Photos and videos are correctly classified.
-- Photo dates are resolved from EXIF.
-- Video dates follow metadata → filename → creation-time priority.
+- Photo dates are resolved from EXIF, and photos never fall back to filename or filesystem time.
+- Video dates follow metadata → filename → birth time → mtime priority.
+- Implausible metadata dates are rejected and fall through to the next tier.
+- A configuration nesting a library inside the source is rejected before scanning.
+- Symlinks are ignored in both the source and the destination.
 - The configurable destination path scheme works.
-- RAW/JPEG pairs are correctly handled.
+- RAW/JPEG pairs are correctly handled, and a JPEG is never suppressed by an undated RAW.
+- Destination collisions are resolved by the configured policy, including two source files that
+  resolve to the same destination path within one run.
 - Source files remain untouched.
 - Existing destination files are handled safely.
 - Repeated imports are idempotent.
@@ -1358,6 +1708,8 @@ The implementation is considered complete when:
 - `make test` succeeds.
 - `make lint` succeeds.
 - `make build` produces valid Python packages.
-- `make publish-pypi` publishes using environment-provided credentials.
-- `make publish-conda` publishes using environment-provided credentials.
+- `make publish-testpypi` completes a real upload to TestPyPI using environment-provided credentials.
+- `make publish-pypi` is verified to build and authenticate, and fails clearly when credentials are
+  absent. Actually publishing to production PyPI is a release action, not an acceptance criterion —
+  it claims a name irreversibly and cannot be undone.
 - README installation and usage instructions are complete.
