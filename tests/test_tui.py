@@ -8,6 +8,7 @@ logic lives here, because none does.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 
 from tests.conftest import FakeExtractor, make_file
@@ -30,6 +31,26 @@ def app_for(config: Config, extractor: FakeExtractor, tmp_path) -> MediaImporter
 
 def text_of(app, selector: str) -> str:
     return str(app.screen.query_one(selector, Static).content)
+
+
+async def settle(app, pilot):
+    """Wait for background workers, then let the resulting UI updates land.
+
+    Planning and importing both run on worker threads, so a fixed number of
+    ticks is a race. Waiting on the worker manager is deterministic.
+    """
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def wait_until(pilot, predicate, what, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause(0.02)
+    raise AssertionError(f"timed out after {timeout}s waiting for {what}")
 
 
 def test_main_screen_shows_current_configuration(config, extractor, tmp_path):
@@ -68,11 +89,8 @@ def test_preview_reports_the_plan_without_copying(config, extractor, tmp_path):
             app.screen.action_start_import()
             await pilot.pause()
             assert isinstance(app.screen, PreviewScreen)
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if app.screen.plan is not None:
-                    break
-            assert app.screen.plan is not None
+            await settle(app, pilot)
+            await wait_until(pilot, lambda: app.screen.plan is not None, "the plan to be built")
             summary = text_of(app, "#summary")
             assert "Import summary" in summary
             assert "Files to import" in summary
@@ -94,17 +112,17 @@ def test_full_import_through_the_interface(config, extractor, tmp_path):
         async with app.run_test() as pilot:
             await pilot.pause()
             app.screen.action_start_import()
-            await pilot.pause()
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if getattr(app.screen, "plan", None) is not None:
-                    break
+            await settle(app, pilot)
+            await wait_until(
+                pilot, lambda: getattr(app.screen, "plan", None) is not None, "the plan"
+            )
+            assert app.screen.plan.to_copy, "nothing was planned, so nothing would be imported"
+
             app.screen._proceed()
-            for _ in range(80):
-                await pilot.pause(0.05)
-                if isinstance(app.screen, ReportScreen):
-                    break
-            assert isinstance(app.screen, ReportScreen)
+            await settle(app, pilot)
+            await wait_until(
+                pilot, lambda: isinstance(app.screen, ReportScreen), "the report screen"
+            )
             assert "Import complete" in text_of(app, "#report")
 
     run(go)

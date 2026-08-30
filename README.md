@@ -40,24 +40,55 @@ IMPORT/                                PHOTO_LIBRARY/
 - Python 3.11 or newer
 - `exiftool` and `ffprobe`
 
-### External tools
+Capture dates are read by `exiftool` and `ffprobe`. These are **not** Python packages, so `pip`
+cannot install them, and `media-importer` refuses to start without them.
 
-Capture dates are read by two external programs. They are **not** Python packages, so `pip` cannot
-install them, and `media-importer` will refuse to start without them.
+### System dependencies
+
+Install everything the application needs, including Python itself, in one command.
+
+**Debian / Ubuntu / WSL**
 
 ```bash
-# Debian / Ubuntu / WSL
-sudo apt install libimage-exiftool-perl ffmpeg
-
-# Fedora
-sudo dnf install perl-Image-ExifTool ffmpeg-free
-
-# Arch
-sudo pacman -S perl-image-exiftool ffmpeg
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv \
+                    libimage-exiftool-perl ffmpeg
 ```
 
-`ffprobe` ships inside the `ffmpeg` package. On Fedora, `ffmpeg-free` from the main repositories
-provides it; the RPM Fusion `ffmpeg` build also works and covers more codecs.
+**Fedora**
+
+```bash
+sudo dnf install -y python3 python3-pip \
+                    perl-Image-ExifTool ffmpeg-free
+```
+
+**Arch**
+
+```bash
+sudo pacman -S --needed python python-pip perl-image-exiftool ffmpeg
+```
+
+Then check that everything is in place:
+
+```bash
+python3 --version     # must be 3.11 or newer
+exiftool -ver
+ffprobe -version | head -1
+```
+
+If you are installing from source, `make check-tools` does the last two for you.
+
+#### Notes
+
+- **`ffprobe` has no package of its own** — it ships inside `ffmpeg`.
+- **On Fedora**, `ffmpeg-free` comes from the main repositories and provides `ffprobe`. The RPM
+  Fusion `ffmpeg` build works too and covers more codecs; use it if you already have that repository
+  enabled.
+- **On Debian and Ubuntu**, `python3-venv` is a separate package and is easy to miss. Without it
+  `make install` fails when it tries to create the virtualenv.
+- **Python 3.11 is the minimum.** Debian 12, Ubuntu 24.04, and current Fedora and Arch all ship
+  something new enough. Ubuntu 22.04 (Python 3.10) and Debian 11 (3.9) do not — use a newer release,
+  or install a newer Python alongside the system one.
 
 ## Installation
 

@@ -262,7 +262,6 @@ class PreviewScreen(Screen):
     BINDINGS: ClassVar = [("escape", "cancel", "Back")]
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with VerticalScroll(id="main"):
             yield Static("Scanning...", id="summary")
             yield Static(id="details")
@@ -378,7 +377,6 @@ class ProgressScreen(Screen):
         self._stop = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with Vertical(id="main"):
             yield Static("Importing...", id="status")
             yield ProgressBar(total=max(len(self.plan.to_copy), 1), id="bar")
@@ -445,7 +443,6 @@ class ReportScreen(Screen):
         self.report = report
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with VerticalScroll(id="main"):
             yield Static(id="report")
             with Horizontal(classes="buttons"):

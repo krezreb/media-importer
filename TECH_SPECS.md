@@ -1443,27 +1443,43 @@ Including:
 
 Supported Python version and operating systems (Linux and WSL).
 
-### External tools
+### System dependencies
 
-`exiftool` and `ffprobe` must be installed and on `PATH`. They are not Python packages, so `pip`
-cannot install them, and the application will refuse to start without them.
+The README must give a **complete** per-distribution system prerequisite command — one that installs
+Python, pip, the virtualenv package, and both metadata tools together, so a reader can get from a
+bare machine to a working install without assembling it themselves.
+
+At minimum apt and dnf must be covered:
 
 ```bash
 # Debian / Ubuntu / WSL
-sudo apt install libimage-exiftool-perl ffmpeg
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv \
+                    libimage-exiftool-perl ffmpeg
 
 # Fedora
-sudo dnf install perl-Image-ExifTool ffmpeg-free
+sudo dnf install -y python3 python3-pip \
+                    perl-Image-ExifTool ffmpeg-free
 
 # Arch
-sudo pacman -S perl-image-exiftool ffmpeg
+sudo pacman -S --needed python python-pip perl-image-exiftool ffmpeg
 ```
 
-`ffprobe` ships inside the `ffmpeg` package. On Fedora, `ffmpeg-free` from the main repositories
-provides it; the RPM Fusion `ffmpeg` build also works and covers more codecs.
+Followed by a verification step the reader can run (`python3 --version`, `exiftool -ver`,
+`ffprobe -version`), cross-referenced to `make check-tools`.
 
-This requirement must appear prominently, before the install commands below, since a PyPI wheel
-cannot express it.
+The following caveats must be documented, because each one is a real install failure:
+
+- `ffprobe` has no package of its own; it ships inside `ffmpeg`.
+- On Fedora, `ffmpeg-free` from the main repositories provides `ffprobe`; the RPM Fusion `ffmpeg`
+  build also works and covers more codecs.
+- On Debian and Ubuntu, `python3-venv` is a separate package. Without it `make install` fails when
+  it creates the virtualenv.
+- Python 3.11 is the minimum. Ubuntu 22.04 (3.10) and Debian 11 (3.9) are too old; Debian 12,
+  Ubuntu 24.04, Fedora and Arch are current enough.
+
+This section must appear prominently, before the install commands, since a PyPI wheel cannot express
+a system dependency.
 
 ## Installation
 
