@@ -120,14 +120,29 @@ class TestSettings:
 
         run(go)
 
-    def test_move_mode_is_warned_about_on_the_main_screen(self, config, extractor, tmp_path):
+    def test_move_mode_states_its_effect_on_the_main_screen(self, config, extractor, tmp_path):
+        """Stated plainly, in terms of where the files end up -- not as an alarm."""
         config.import_action = ImportAction.MOVE
 
         async def go():
             app = app_for(config, extractor, tmp_path)
             async with app.run_test() as pilot:
                 await pilot.pause()
-                assert "deleted" in text_of(app, "#notice")
+                notice = text_of(app, "#notice")
+                assert "no longer be present in the import directory" in notice
+                assert "delet" not in notice.lower()
+
+        run(go)
+
+    def test_both_actions_describe_where_files_end_up(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                row = next(r for r in app.screen.query(SettingRow) if r.button_id == "edit-action")
+                value = str(row.query_one(".setting-value", Static).content)
+                assert "originals are kept in place" in value
+                assert "delet" not in value.lower()
 
         run(go)
 
@@ -311,7 +326,9 @@ class TestImportScreen:
             async with app.run_test() as pilot:
                 await pilot.pause()
                 await reach_summary(app, pilot)
-                assert "will be deleted" in text_of(app, "#summary")
+                summary = text_of(app, "#summary")
+                assert "no longer be present in the import directory" in summary
+                assert "delet" not in summary.lower()
                 await pilot.click("#proceed")
                 await settle(app, pilot)
                 await wait_until(pilot, lambda: app.screen.report is not None, "the report")
@@ -410,3 +427,46 @@ def test_step_log_updates_rather_than_duplicating(config, extractor, tmp_path):
             assert rows[0].step.completed == 5
 
     run(go)
+
+
+def test_no_move_dialogue_uses_the_word_delete(config, extractor, tmp_path):
+    """Every move-related string states where files end up, not what is destroyed."""
+    make_file(config.source_path / "IMG_1.JPG")
+    extractor.dates["IMG_1.JPG"] = DT
+    config.import_action = ImportAction.MOVE
+    seen: list[str] = []
+
+    async def go():
+        app = app_for(config, extractor, tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            seen.append(text_of(app, "#notice"))
+            seen.append(
+                str(
+                    next(r for r in app.screen.query(SettingRow) if r.button_id == "edit-action")
+                    .query_one(".setting-value", Static)
+                    .content
+                )
+            )
+
+            # The copy/move chooser itself.
+            await pilot.click("#edit-action")
+            await pilot.pause()
+            seen.append(str(app.screen.query_one(".hint", Static).content))
+            seen.extend(str(b.label) for b in app.screen.query(Button))
+            await pilot.click("#cancel")
+            await pilot.pause()
+
+            # Summary, then the final report.
+            await reach_summary(app, pilot)
+            seen.append(text_of(app, "#summary"))
+            await pilot.click("#proceed")
+            await settle(app, pilot)
+            await wait_until(pilot, lambda: app.screen.report is not None, "the report")
+            seen.append(text_of(app, "#summary"))
+
+    run(go)
+
+    offenders = [text for text in seen if "delet" in text.lower()]
+    assert not offenders, f"alarmist wording still present: {offenders}"
+    assert any("no longer be present in the import directory" in t for t in seen)
