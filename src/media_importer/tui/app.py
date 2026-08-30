@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
@@ -66,15 +68,15 @@ class EditValueScreen(ModalScreen[str | None]):
                 yield Static(self.hint, classes="hint")
             yield Input(value=self.value, id="value")
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Save", variant="primary", id="save")
+                yield Button("OK", variant="primary", id="ok")
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
         self.query_one("#value", Input).focus()
 
-    @on(Button.Pressed, "#save")
+    @on(Button.Pressed, "#ok")
     @on(Input.Submitted, "#value")
-    def _save(self) -> None:
+    def _ok(self) -> None:
         self.dismiss(self.query_one("#value", Input).value.strip())
 
     @on(Button.Pressed, "#cancel")
@@ -83,7 +85,11 @@ class EditValueScreen(ModalScreen[str | None]):
 
 
 class ChoiceScreen(ModalScreen[str | None]):
-    """Pick one of a small set of named options."""
+    """Pick one of a small set of named options, then confirm.
+
+    Clicking an option only selects it; nothing is applied until OK, so a
+    choice can be reconsidered or abandoned like in every other dialog here.
+    """
 
     BINDINGS: ClassVar = [("escape", "cancel", "Cancel")]
 
@@ -95,6 +101,7 @@ class ChoiceScreen(ModalScreen[str | None]):
         self.options = options
         self.current = current
         self.note = note
+        self.selected = current
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -102,17 +109,28 @@ class ChoiceScreen(ModalScreen[str | None]):
             if self.note:
                 yield Static(self.note, classes="hint")
             for value, description in self.options:
-                marker = "●" if value == self.current else "○"
-                yield Button(f"{marker}  {value} - {description}", id=f"opt-{value}")
-            yield Button("Cancel", id="cancel")
+                yield Button(self._option_label(value, description), id=f"opt-{value}")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("OK", variant="primary", id="ok")
+                yield Button("Cancel", id="cancel")
+
+    def _option_label(self, value: str, description: str) -> str:
+        marker = "●" if value == self.selected else "○"
+        return f"{marker}  {value} - {description}"
 
     @on(Button.Pressed)
     def _pressed(self, event: Button.Pressed) -> None:
         assert event.button.id is not None
         if event.button.id == "cancel":
             self.dismiss(None)
+        elif event.button.id == "ok":
+            self.dismiss(self.selected)
         else:
-            self.dismiss(event.button.id.removeprefix("opt-"))
+            self.selected = event.button.id.removeprefix("opt-")
+            for value, description in self.options:
+                self.query_one(f"#opt-{value}", Button).label = self._option_label(
+                    value, description
+                )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -130,29 +148,72 @@ class SettingRow(Horizontal):
     setting and exactly one place to click to change it.
     """
 
-    def __init__(self, label: str, button_id: str) -> None:
+    def __init__(self, label: str, button_id: str, button_label: str = "Change") -> None:
         super().__init__(classes="setting-row")
         self.label_text = label
         self.button_id = button_id
+        self.button_label = button_label
         self._value = ""
 
     def compose(self) -> ComposeResult:
         yield Static(self.label_text, classes="setting-label")
         yield Static(self._value, classes="setting-value")
-        yield Button("Change", id=self.button_id, classes="setting-button")
+        yield Button(self.button_label, id=self.button_id, classes="setting-button")
 
     def set_value(self, value: str) -> None:
         self._value = value
         with contextlib.suppress(NoMatches):  # not yet composed
             self.query_one(".setting-value", Static).update(value)
 
+    def set_enabled(self, enabled: bool) -> None:
+        """Grey out the button when the setting is not the user's to change."""
+        with contextlib.suppress(NoMatches):  # not yet composed
+            self.query_one(Button).disabled = not enabled
+
 
 def _fmt(value: object) -> str:
     return str(value) if value else "[dim italic]not set[/dim italic]"
 
 
+def _fmt_path(value: Path | None) -> str:
+    """Show a path as configured, plus where it actually points if relative.
+
+    A configured '.' is honest but opaque, so the directory it resolves to is
+    spelled out next to it rather than left for the user to work out.
+    """
+    if not value:
+        return _fmt(value)
+    text = str(value)
+    if value.is_absolute():
+        return text
+    absolute = Path(os.path.normpath(Path.cwd() / value))
+    return f"{text} [dim]({_shorten(absolute)})[/dim]"
+
+
+def _shorten(path: Path) -> str:
+    """`~` for the home directory, so the annotation fits on one row."""
+    home = Path.home()
+    if path == home:
+        return "~"
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home)}"
+    return str(path)
+
+
+def _libraries_shared(config: Config) -> bool:
+    """Whether videos are being filed into the photo library.
+
+    The state is read back off the configuration rather than stored beside it,
+    so a config file edited by hand cannot disagree with what is displayed.
+    """
+    return config.photo_library is not None and config.photo_library == config.video_library
+
+
 class MainScreen(Screen):
     BINDINGS: ClassVar = [("q", "quit", "Quit"), ("i", "start_import", "Import")]
+
+    _video_library_before_sharing: Path | None = None
+    """Restored when videos stop sharing the photo library, within this session."""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -161,6 +222,7 @@ class MainScreen(Screen):
             yield SettingRow("Source directory", "edit-source")
             yield SettingRow("Photo library", "edit-photos")
             yield SettingRow("Video library", "edit-videos")
+            yield SettingRow("Same as photos", "toggle-same-lib", "Toggle")
             yield SettingRow("Path scheme", "edit-scheme")
             yield SettingRow("Import action", "edit-action")
             yield SettingRow("On collision", "edit-collision")
@@ -178,9 +240,23 @@ class MainScreen(Screen):
         cfg: Config = self.app.config  # type: ignore[attr-defined]
         rows = {row.button_id: row for row in self.query(SettingRow)}
 
-        rows["edit-source"].set_value(_fmt(cfg.source_path))
-        rows["edit-photos"].set_value(_fmt(cfg.photo_library))
-        rows["edit-videos"].set_value(_fmt(cfg.video_library))
+        shared = _libraries_shared(cfg)
+
+        rows["edit-source"].set_value(_fmt_path(cfg.source_path))
+        rows["edit-photos"].set_value(_fmt_path(cfg.photo_library))
+        rows["edit-videos"].set_value(
+            f"{_fmt_path(cfg.video_library)} [dim]- same as photo library[/dim]"
+            if shared
+            else _fmt_path(cfg.video_library)
+        )
+        # The video library is not the user's to edit while it is following the
+        # photo library; the toggle is the way back to an independent one.
+        rows["edit-videos"].set_enabled(not shared)
+        rows["toggle-same-lib"].set_value(
+            "yes [dim]- videos go to the photo library[/dim]"
+            if shared
+            else "no [dim]- videos have their own library[/dim]"
+        )
         rows["edit-scheme"].set_value(cfg.import_path)
 
         if cfg.import_action is ImportAction.MOVE:
@@ -222,13 +298,17 @@ class MainScreen(Screen):
 
     # -- editing ----------------------------------------------------------
 
-    def _edit_path(self, title: str, attr: str, hint: str) -> None:
+    def _edit_path(
+        self, title: str, attr: str, hint: str, then: Callable[[], None] | None = None
+    ) -> None:
         cfg: Config = self.app.config  # type: ignore[attr-defined]
 
         def done(value: str | None) -> None:
             if value is None:
                 return
             setattr(cfg, attr, Path(value).expanduser() if value else None)
+            if then is not None:
+                then()
             self.app.save_config()  # type: ignore[attr-defined]
             self.refresh_settings()
 
@@ -244,11 +324,43 @@ class MainScreen(Screen):
 
     @on(Button.Pressed, "#edit-photos")
     def _photos(self) -> None:
-        self._edit_path("Photo library", "photo_library", "Created if it does not exist.")
+        cfg: Config = self.app.config  # type: ignore[attr-defined]
+        # A shared video library keeps following the photo library when it moves.
+        follow = _libraries_shared(cfg)
+
+        def keep_shared() -> None:
+            cfg.video_library = cfg.photo_library
+
+        self._edit_path(
+            "Photo library",
+            "photo_library",
+            "Created if it does not exist.",
+            then=keep_shared if follow else None,
+        )
 
     @on(Button.Pressed, "#edit-videos")
     def _videos(self) -> None:
         self._edit_path("Video library", "video_library", "Created if it does not exist.")
+
+    @on(Button.Pressed, "#toggle-same-lib")
+    def _toggle_same_library(self) -> None:
+        cfg: Config = self.app.config  # type: ignore[attr-defined]
+        if _libraries_shared(cfg):
+            # Hand back whatever video library was in use before sharing; there
+            # is nothing to restore on a fresh session, so it falls back to unset.
+            cfg.video_library = self._video_library_before_sharing
+        else:
+            if cfg.photo_library is None:
+                self.notify(
+                    "Set the photo library first, then share it with videos.",
+                    severity="warning",
+                    timeout=8,
+                )
+                return
+            self._video_library_before_sharing = cfg.video_library
+            cfg.video_library = cfg.photo_library
+        self.app.save_config()  # type: ignore[attr-defined]
+        self.refresh_settings()
 
     @on(Button.Pressed, "#edit-scheme")
     def _scheme(self) -> None:
@@ -697,11 +809,13 @@ class MediaImporterApp(App):
     .section-title { text-style: bold; padding-bottom: 1; }
     .dim-note { color: $text-muted; padding-top: 1; }
 
-    /* One row per setting so the whole configuration fits an 80x24 terminal
-       without scrolling. */
-    .setting-row { height: 1; width: 100%; margin-bottom: 1; }
+    /* One line per setting, with no blank line between them, so the whole
+       configuration fits an 80x24 terminal without scrolling. */
+    .setting-row { height: 1; width: 100%; }
     .setting-label { width: 20; height: 1; }
-    .setting-value { width: 1fr; height: 1; }
+    /* A value too long for the row is trimmed with an ellipsis; left to wrap,
+       its overflow would fall off the single-line row and vanish silently. */
+    .setting-value { width: 1fr; height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     .setting-button { width: 10; min-width: 10; height: 1; border: none; }
 
     .notice { padding: 1 0 0 0; }
@@ -726,7 +840,9 @@ class MediaImporterApp(App):
     }
     #dialog Button { margin-top: 1; width: 100%; }
     .dialog-title { text-style: bold; padding-bottom: 1; }
+    /* OK and Cancel share the width of the dialog rather than stacking. */
     .dialog-buttons { height: auto; }
+    #dialog .dialog-buttons Button { width: 1fr; margin: 1 1 0 0; }
     .hint { color: $text-muted; padding-bottom: 1; }
     #summary, #details { height: auto; }
     """

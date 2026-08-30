@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from pathlib import Path
 
 from tests.conftest import FakeExtractor, make_file
-from textual.widgets import Button, ProgressBar, Static
+from textual.widgets import Button, Input, ProgressBar, Static
 
 from media_importer.config import Config
 from media_importer.models import CollisionPolicy, ImportAction
@@ -39,6 +40,12 @@ def app_for(config: Config, extractor: FakeExtractor, tmp_path) -> MediaImporter
 
 def text_of(app, selector: str) -> str:
     return str(app.screen.query_one(selector, Static).content)
+
+
+def value_of(app, button_id: str) -> str:
+    """The displayed value of the setting row owning `button_id`."""
+    row = next(r for r in app.screen.query(SettingRow) if r.button_id == button_id)
+    return str(row.query_one(".setting-value", Static).content)
 
 
 async def settle(app, pilot):
@@ -79,6 +86,7 @@ class TestSettings:
                     "edit-source",
                     "edit-photos",
                     "edit-videos",
+                    "toggle-same-lib",
                     "edit-scheme",
                     "edit-action",
                     "edit-collision",
@@ -146,6 +154,129 @@ class TestSettings:
 
         run(go)
 
+    def test_the_configuration_block_fits_an_80x24_terminal(self, config, extractor, tmp_path):
+        """Every setting has to be visible at once, without scrolling."""
+
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                main = app.screen.query_one("#main")
+                assert main.virtual_size.height <= main.size.height
+
+        run(go)
+
+    def test_a_relative_source_directory_shows_where_it_points(
+        self, extractor, tmp_path, monkeypatch
+    ):
+        """'.' is honest but opaque, so the directory it means is spelled out."""
+        monkeypatch.chdir(tmp_path)
+
+        async def go():
+            app = app_for(Config(source_path=Path(".")), extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                value = value_of(app, "edit-source")
+                assert value.startswith(".")
+                assert f"({tmp_path})" in value
+
+        run(go)
+
+    def test_an_absolute_source_directory_is_shown_once(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                value = value_of(app, "edit-source")
+                assert value == str(config.source_path)
+
+        run(go)
+
+
+class TestSharedLibrary:
+    def test_toggle_points_videos_at_the_photo_library(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert value_of(app, "toggle-same-lib").startswith("no")
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                assert app.config.video_library == app.config.photo_library
+                assert value_of(app, "toggle-same-lib").startswith("yes")
+                assert "same as photo library" in value_of(app, "edit-videos")
+
+        run(go)
+
+        from media_importer.config import load
+
+        saved = load(tmp_path / "config.toml")
+        assert saved.video_library == saved.photo_library
+
+    def test_the_video_library_cannot_be_edited_while_it_is_shared(
+        self, config, extractor, tmp_path
+    ):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                assert app.screen.query_one("#edit-videos", Button).disabled
+
+        run(go)
+
+    def test_toggling_back_off_restores_the_separate_video_library(
+        self, config, extractor, tmp_path
+    ):
+        videos = config.video_library
+
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                await pilot.pause(0.5)  # so the second click is not read as a double click
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                assert app.config.video_library == videos
+                assert value_of(app, "toggle-same-lib").startswith("no")
+                assert not app.screen.query_one("#edit-videos", Button).disabled
+
+        run(go)
+
+    def test_a_shared_video_library_follows_the_photo_library(self, config, extractor, tmp_path):
+        moved = tmp_path / "elsewhere"
+
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                await pilot.click("#edit-photos")
+                await pilot.pause()
+                app.screen.query_one("#value", Input).value = str(moved)
+                await pilot.click("#ok")
+                await pilot.pause()
+                assert app.config.photo_library == moved
+                assert app.config.video_library == moved
+
+        run(go)
+
+    def test_sharing_needs_a_photo_library_first(self, extractor, tmp_path):
+        async def go():
+            app = app_for(Config(), extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#toggle-same-lib")
+                await pilot.pause()
+                assert app.config.video_library is None
+                assert value_of(app, "toggle-same-lib").startswith("no")
+
+        run(go)
+
     def test_start_button_is_labelled_start_import_process(self, config, extractor, tmp_path):
         async def go():
             app = app_for(config, extractor, tmp_path)
@@ -186,6 +317,69 @@ class TestMouse:
 
         run(go)
 
+    def test_every_config_dialogue_offers_ok_and_cancel(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                for opener in ("#edit-scheme", "#edit-action"):
+                    await pilot.click(opener)
+                    await pilot.pause()
+                    labels = {str(b.label) for b in app.screen.query(Button)}
+                    assert {"OK", "Cancel"} <= labels, opener
+                    await pilot.click("#cancel")
+                    await pilot.pause()
+
+        run(go)
+
+    def test_selecting_an_option_applies_nothing_until_ok(self, config, extractor, tmp_path):
+        """A misclick in the chooser costs nothing: Cancel still means cancel."""
+
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#edit-action")
+                await pilot.pause()
+                await pilot.click("#opt-move")
+                await pilot.pause()
+                # Selected, and shown as selected -- but not applied.
+                assert "●  move" in str(app.screen.query_one("#opt-move", Button).label)
+                assert app.config.import_action is ImportAction.COPY
+                await pilot.click("#cancel")
+                await pilot.pause()
+                assert app.config.import_action is ImportAction.COPY
+
+        run(go)
+
+    def test_cancelling_a_value_editor_changes_nothing(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#edit-scheme")
+                await pilot.pause()
+                app.screen.query_one("#value", Input).value = "YYYY"
+                await pilot.click("#cancel")
+                await pilot.pause()
+                assert app.config.import_path == "YYYY/MM/DD"
+
+        run(go)
+
+    def test_ok_in_a_value_editor_applies_the_change(self, config, extractor, tmp_path):
+        async def go():
+            app = app_for(config, extractor, tmp_path)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#edit-scheme")
+                await pilot.pause()
+                app.screen.query_one("#value", Input).value = "YYYY/YYYY-MM-DD"
+                await pilot.click("#ok")
+                await pilot.pause()
+                assert app.config.import_path == "YYYY/YYYY-MM-DD"
+
+        run(go)
+
     def test_choosing_move_by_mouse_persists_it(self, config, extractor, tmp_path):
         async def go():
             app = app_for(config, extractor, tmp_path)
@@ -194,6 +388,8 @@ class TestMouse:
                 await pilot.click("#edit-action")
                 await pilot.pause()
                 await pilot.click("#opt-move")
+                await pilot.pause()
+                await pilot.click("#ok")
                 await pilot.pause()
                 assert app.config.import_action is ImportAction.MOVE
 

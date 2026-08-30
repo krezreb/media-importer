@@ -131,13 +131,24 @@ The main screen puts every setting, its current value, and the button that chang
 Source directory    /mnt/import                              Change
 Photo library       /srv/photos                              Change
 Video library       /srv/videos                              Change
+Same as photos      no - videos have their own library       Toggle
 Path scheme         YYYY/MM/DD                               Change
-Import action       copy - source files are left alone       Change
+Import action       copy - originals stay in the import dir  Change
 On collision        skip                                     Change
 ```
 
+Every dialogue that changes a setting ends in **OK** and **Cancel**. In the ones that offer a list of
+choices, clicking an option only selects it — nothing is applied until you press OK, and Escape or
+Cancel leaves the setting as it was.
+
 The source directory defaults to whatever directory you launched from, so running `media-importer`
-inside a freshly-mounted card generally needs no setup at all.
+inside a freshly-mounted card generally needs no setup at all. A relative path is shown with the
+directory it actually points at beside it, so a configured `.` reads as `. (/mnt/import)` rather than
+leaving you to work it out.
+
+**Same as photos** files videos into the photo library instead of a separate one. While it is on, the
+video library follows the photo library wherever you move it, and its own Change button is greyed
+out; toggling it off hands back the video library you had before.
 
 Choosing **Start import process** scans the source and builds a complete plan, showing each phase as
 its own step with its own progress bar. Finished steps stay on screen, so the run reads as a log:
@@ -195,7 +206,7 @@ On first run the file is created with `source_path` set to the directory you lau
 | --- | --- |
 | `source_path` | Directory scanned recursively for media. Never modified. |
 | `photo_library` | Destination root for photos. Created if missing. |
-| `video_library` | Destination root for videos. Created if missing. |
+| `video_library` | Destination root for videos. Created if missing. May be the same path as `photo_library`, which is what the *Same as photos* toggle sets. |
 | `import_path` | Destination layout. See below. |
 | `import_action` | `copy` or `move`. See below. |
 | `on_collision` | `skip`, `clobber`, or `rename`. See below. |

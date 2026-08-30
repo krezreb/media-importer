@@ -50,6 +50,7 @@ The main interface should allow the user to:
 - Select/configure the source/import directory
 - Select/configure the photo library destination
 - Select/configure the video library destination
+- Point the video library at the photo library, so videos are filed alongside photos
 - Configure the destination path scheme
 - Configure the import action (copy or move)
 - Configure the collision policy
@@ -68,10 +69,27 @@ setting:
 Source directory    /mnt/import                        [Change]
 Photo library       /srv/photos                        [Change]
 Video library       /srv/videos                        [Change]
+Same as photos      no                                 [Toggle]
 Path scheme         YYYY/MM/DD                         [Change]
 Import action       copy                               [Change]
 On collision        skip                               [Change]
 ```
+
+A displayed path that is relative must be shown together with the directory it actually points at,
+in parentheses — a configured `.` reads as `. (/mnt/import)`. A value too long for its row is
+trimmed with an ellipsis rather than being allowed to disappear.
+
+**Same as photos** sets the video library to the photo library, so videos are filed alongside
+photos. While it is on, the video library follows the photo library when that changes, and the video
+library's own control must be unavailable — the toggle is the only way back to a separate library.
+The state is derived from the two paths being equal, not stored separately, so a configuration file
+edited by hand cannot disagree with what the screen shows.
+
+## 2.1.1 Dialogues
+
+Every dialogue that changes a setting must offer **OK** and **Cancel**. Selecting an option inside a
+dialogue must not apply it: a choice takes effect only on OK, and Cancel or Escape must leave the
+setting exactly as it was.
 
 Any warning about incomplete or dangerous configuration — unset directories, or `move` being
 selected — belongs in this same block, directly beneath the settings it refers to. A displayed value,
