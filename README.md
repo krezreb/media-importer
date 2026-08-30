@@ -133,7 +133,7 @@ Photo library       /srv/photos                              Change
 Video library       /srv/videos                              Change
 Same as photos      no - videos have their own library       Toggle
 Path scheme         YYYY/MM/DD                               Change
-Import action       copy - originals stay in the import dir  Change
+Import action       copy - originals are kept in place       Change
 On collision        skip                                     Change
 ```
 

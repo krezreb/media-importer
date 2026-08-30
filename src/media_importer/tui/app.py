@@ -260,13 +260,9 @@ class MainScreen(Screen):
         rows["edit-scheme"].set_value(cfg.import_path)
 
         if cfg.import_action is ImportAction.MOVE:
-            rows["edit-action"].set_value(
-                "move [dim]- imported files leave the import directory[/dim]"
-            )
+            rows["edit-action"].set_value("move [dim]- files leave the import directory[/dim]")
         else:
-            rows["edit-action"].set_value(
-                "copy [dim]- originals stay in the import directory[/dim]"
-            )
+            rows["edit-action"].set_value("copy [dim]- originals are kept in place[/dim]")
 
         policy = cfg.on_collision.value
         if cfg.on_collision is CollisionPolicy.CLOBBER:
@@ -287,8 +283,7 @@ class MainScreen(Screen):
             notice.update(f"[yellow]Set the {', '.join(missing)} above before importing.[/yellow]")
         elif cfg.import_action is ImportAction.MOVE:
             notice.update(
-                "[dim]Import action is 'move': imported files will no longer be present "
-                "in the import directory afterwards.[/dim]"
+                "[dim]Imported files will no longer be present in the import directory.[/dim]"
             )
         else:
             notice.update("")

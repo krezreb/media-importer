@@ -149,7 +149,7 @@ class TestSettings:
                 await pilot.pause()
                 row = next(r for r in app.screen.query(SettingRow) if r.button_id == "edit-action")
                 value = str(row.query_one(".setting-value", Static).content)
-                assert "originals stay in the import directory" in value
+                assert "originals are kept in place" in value
                 assert "delet" not in value.lower()
 
         run(go)
