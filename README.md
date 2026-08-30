@@ -5,8 +5,8 @@ metadata rather than by where the files happen to sit.
 
 Point it at a camera card, a phone backup, or a decade of accumulated mess. It reads each file's
 capture date, works out where the file belongs, shows you exactly what it is about to do, and only
-then copies. **By default your source files are never modified, moved, renamed, or deleted** — and
-if you would rather empty the import folder as you go, there is an opt-in `move` mode.
+then copies. **By default your source files are never modified, moved, or renamed** — and if you
+would rather clear the import folder as you go, there is an opt-in `move` mode.
 
 ```text
 IMPORT/                                PHOTO_LIBRARY/
@@ -32,7 +32,7 @@ IMPORT/                                PHOTO_LIBRARY/
 - **Separate photo and video libraries.**
 - **RAW + JPEG pairing.** When a camera wrote both, the RAW is imported and the JPEG left alone.
 - **Configurable destination layout.** `YYYY/MM/DD` by default, and freely changeable.
-- **Copy or move.** Keep the originals, or clear the import folder as files land.
+- **Copy or move.** Keep the originals, or have imported files leave the import folder as they land.
 - **Safe repeated imports.** Run it as often as you like; nothing is duplicated or overwritten.
 - **Preview before copying.** Every import is planned in full and shown to you for confirmation.
 - **Mouse or keyboard.** Every control is clickable; nothing is keyboard-only.
@@ -311,15 +311,15 @@ merits — otherwise a bad RAW would take a perfectly good JPEG down with it.
 
 | Value | Behaviour |
 | --- | --- |
-| `copy` (default) | The original stays in the source directory. The source tree is strictly read-only. |
-| `move` | The original is deleted — but only once its copy is verifiably in the library. |
+| `copy` (default) | Originals stay in the import directory. The source tree is strictly read-only. |
+| `move` | Imported files are no longer present in the import directory afterwards. |
 
-`move` is the only thing this tool does that removes your data, so the rule is deliberately narrow:
+With `move`, a file leaves the import directory only once it is safely in the library:
 
-> A source file is deleted **only** when that same file was just imported, and **only** after the
-> destination copy is complete.
+> A file is removed from the import directory **only** when that same file was just imported, and
+> **only** after its copy in the library is complete.
 
-Everything else keeps its original. A file is left exactly where it is when it was:
+Everything else stays exactly where it is. A file is left in place when it was:
 
 - skipped as a JPEG paired with a RAW,
 - undated,
@@ -328,17 +328,18 @@ Everything else keeps its original. A file is left exactly where it is when it w
 - ignored as unsupported or as a symlink,
 - or failed for any reason during the copy.
 
-That last one is the important one: **if the copy did not land, the original survives.**
+That last one is the important one: **if the copy did not land, the file stays in the import
+directory.**
 
-Note that *already imported* is not grounds for deletion. Finding an identical file in the library is
-not the same as this run having imported it, and deleting on that basis would turn a harmless re-scan
-into silent data loss. If you want those originals gone, remove them yourself.
+Note that *already imported* does not count. Finding an identical file in the library is not the same
+as this run having imported it, so those files stay in the import directory. If you want them gone,
+remove them yourself.
 
 Moving within one filesystem does not rewrite the file, so moving a folder of 4K video is instant
-rather than disk-bound. Across filesystems it falls back to copying and then deleting.
+rather than disk-bound. Across filesystems it falls back to copying, then removing the original.
 
-The interface warns you on the main screen and again in the import summary whenever `move` is
-selected.
+The interface states which action is selected on the main screen, and again in the import summary
+before you confirm.
 
 ## Collisions
 
@@ -358,8 +359,8 @@ to the same destination — the second of which would otherwise silently overwri
 
 ## Safety
 
-- Source files are never modified in place. Under the default `copy` action they are never removed
-  at all; under `move` a file is removed only after it has been successfully imported.
+- Source files are never modified in place. Under the default `copy` action they always stay in the
+  import directory; under `move` a file leaves it only after it has been successfully imported.
 - Existing destination files are never silently overwritten.
 - Copies are written to a temporary file in the destination directory and moved into place
   atomically, so an interrupted run cannot leave a truncated file that looks imported.

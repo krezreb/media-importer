@@ -88,19 +88,19 @@ class ChoiceScreen(ModalScreen[str | None]):
     BINDINGS: ClassVar = [("escape", "cancel", "Cancel")]
 
     def __init__(
-        self, title: str, options: list[tuple[str, str]], current: str, warning: str = ""
+        self, title: str, options: list[tuple[str, str]], current: str, note: str = ""
     ) -> None:
         super().__init__()
         self.title_text = title
         self.options = options
         self.current = current
-        self.warning = warning
+        self.note = note
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Label(self.title_text, classes="dialog-title")
-            if self.warning:
-                yield Static(self.warning, classes="warning")
+            if self.note:
+                yield Static(self.note, classes="hint")
             for value, description in self.options:
                 marker = "●" if value == self.current else "○"
                 yield Button(f"{marker}  {value} - {description}", id=f"opt-{value}")
@@ -184,9 +184,13 @@ class MainScreen(Screen):
         rows["edit-scheme"].set_value(cfg.import_path)
 
         if cfg.import_action is ImportAction.MOVE:
-            rows["edit-action"].set_value("[b]move[/b] [dim]- source files are deleted[/dim]")
+            rows["edit-action"].set_value(
+                "move [dim]- imported files leave the import directory[/dim]"
+            )
         else:
-            rows["edit-action"].set_value("copy [dim]- source files are left alone[/dim]")
+            rows["edit-action"].set_value(
+                "copy [dim]- originals stay in the import directory[/dim]"
+            )
 
         policy = cfg.on_collision.value
         if cfg.on_collision is CollisionPolicy.CLOBBER:
@@ -207,8 +211,8 @@ class MainScreen(Screen):
             notice.update(f"[yellow]Set the {', '.join(missing)} above before importing.[/yellow]")
         elif cfg.import_action is ImportAction.MOVE:
             notice.update(
-                "[yellow]Import action is 'move': imported files will be deleted "
-                "from the source directory.[/yellow]"
+                "[dim]Import action is 'move': imported files will no longer be present "
+                "in the import directory afterwards.[/dim]"
             )
         else:
             notice.update("")
@@ -287,16 +291,16 @@ class MainScreen(Screen):
 
         self.app.push_screen(
             ChoiceScreen(
-                "What should happen to the source files?",
+                "What should happen to files after they are imported?",
                 [
-                    ("copy", "leave the originals in the source directory"),
-                    ("move", "delete each original once it is imported"),
+                    ("copy", "originals stay in the import directory"),
+                    ("move", "imported files are no longer present in the import directory"),
                 ],
                 cfg.import_action.value,
-                warning=(
-                    "[yellow]'move' deletes source files.[/yellow] Only files that are "
-                    "actually imported are removed - anything skipped, undated, "
-                    "colliding or already present stays where it is."
+                note=(
+                    "With 'move', a file leaves the import directory only once it is safely "
+                    "in the library. Anything skipped, undated, colliding or already present "
+                    "stays where it is."
                 ),
             ),
             chosen,
@@ -535,8 +539,8 @@ class ImportScreen(Screen):
             )
         if cfg.import_action is ImportAction.MOVE and plan.to_copy:
             lines.append(
-                f"\n  [yellow]{len(plan.to_copy):,} source files will be deleted "
-                f"once imported.[/yellow]"
+                f"  [dim]{len(plan.to_copy):,} files will no longer be present in the "
+                f"import directory afterwards.[/dim]"
             )
         self.query_one("#summary", Static).update("\n".join(lines))
 
@@ -625,8 +629,8 @@ class ImportScreen(Screen):
             ]
         if cfg.import_action is ImportAction.MOVE:
             lines.append(
-                "\n[dim]Only imported files were removed from the source. Skipped, "
-                "undated and colliding files were left in place.[/dim]"
+                "\n[dim]Imported files are no longer present in the import directory. "
+                "Skipped, undated and colliding files were left in place.[/dim]"
             )
         else:
             lines.append("\n[dim]Source files were not modified.[/dim]")
@@ -724,7 +728,6 @@ class MediaImporterApp(App):
     .dialog-title { text-style: bold; padding-bottom: 1; }
     .dialog-buttons { height: auto; }
     .hint { color: $text-muted; padding-bottom: 1; }
-    .warning { padding-bottom: 1; }
     #summary, #details { height: auto; }
     """
 
