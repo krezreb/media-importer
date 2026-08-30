@@ -35,7 +35,9 @@ VIDEO_LIBRARY/
             └── 20250827_105030.mp4
 ```
 
-The source files must never be modified, moved, renamed, or deleted.
+Under the default import action, `copy`, the source files are never modified, moved, renamed, or
+deleted. The user may instead choose `move`, which deletes each source file once it has been
+successfully imported — see section 13.
 
 ---
 
@@ -49,12 +51,52 @@ The main interface should allow the user to:
 - Select/configure the photo library destination
 - Select/configure the video library destination
 - Configure the destination path scheme
+- Configure the import action (copy or move)
+- Configure the collision policy
 - Start an import
 - Exit
 
-The currently configured values should be clearly displayed.
+The TUI should be designed for normal repeated use rather than requiring the user to specify all
+options every time.
 
-The TUI should be designed for normal repeated use rather than requiring the user to specify all options every time.
+## 2.1 Configuration Layout
+
+The current value of a setting and the control that changes it must live **together**, as one row per
+setting:
+
+```text
+Source directory    /mnt/import                        [Change]
+Photo library       /srv/photos                        [Change]
+Video library       /srv/videos                        [Change]
+Path scheme         YYYY/MM/DD                         [Change]
+Import action       copy                               [Change]
+On collision        skip                               [Change]
+```
+
+Any warning about incomplete or dangerous configuration — unset directories, or `move` being
+selected — belongs in this same block, directly beneath the settings it refers to. A displayed value,
+the control that edits it, and the warning about it must not be scattered into three separate places
+on the screen.
+
+The whole configuration block, including the primary action, must fit an ordinary 80x24 terminal
+without scrolling.
+
+## 2.2 Mouse
+
+Every control must be operable by mouse as well as by keyboard. Settings are changed by clicking
+their row's button, and the import is confirmed by clicking. Nothing may be reachable by keyboard
+only.
+
+## 2.3 Primary Action
+
+The button that begins an import is labelled:
+
+```text
+Start import process
+```
+
+Primary actions must remain reachable regardless of how much content is on screen — a long list of
+files must never push the confirm or cancel button out of view.
 
 ---
 
@@ -74,11 +116,17 @@ source_path      = "/path/to/import"
 photo_library    = "/path/to/photos"
 video_library    = "/path/to/videos"
 import_path      = "YYYY/MM/DD"
+import_action    = "copy"        # copy | move
 on_collision     = "skip"        # skip | clobber | rename
 clobber_prefers  = "newest"      # newest | oldest  (only used when on_collision = "clobber")
 ```
 
-`on_collision` and `clobber_prefers` are described in section 14.1.
+`import_action` is described in section 13, `on_collision` and `clobber_prefers` in section 14.2.
+
+On first run, when no configuration file exists yet, `source_path` defaults to the working directory
+the application was launched from. That default is written to the configuration file rather than
+being recomputed each time, so it is visible and editable like any other setting instead of being an
+invisible piece of behaviour.
 
 Previously configured values must automatically be loaded when the application starts.
 
@@ -720,20 +768,61 @@ Both files remain untouched in the source either way.
 
 ---
 
-# 13. Source Immutability
+# 13. Source Handling
 
-The source tree must be treated as read-only by the importer.
+What happens to a source file is governed by `import_action`.
 
-The application must never:
+```toml
+import_action = "copy"   # default
+import_action = "move"
+```
+
+## 13.1 Copy (default)
+
+The source tree is treated as strictly read-only. The application must never:
 
 - Delete source files
 - Move source files
 - Rename source files
 - Modify source files
 
-The importer is strictly copy-based.
+This is the default, and it is what makes the source directory usable as a persistent import area.
 
-This is particularly important for skipped JPEGs: they remain in the source even when a corresponding RAW file is imported.
+## 13.2 Move
+
+The user may choose `move`, in which case a source file is **deleted after it has been successfully
+imported**.
+
+This is the one place where the application removes user data, so the rule is deliberately narrow:
+
+> A source file may be deleted **only** when that same file was just imported, and **only** after its
+> destination copy is verifiably complete and in place.
+
+Everything else keeps its source file. Specifically, a source file must be left untouched when it is:
+
+- Skipped as a JPEG paired with a RAW (section 12)
+- Undated (section 20)
+- Blocked by a collision (section 14.2)
+- Already present in the library (section 14.1)
+- Ignored as unsupported or as a symlink (sections 4.1, 5)
+- Failed for any reason during the copy
+
+The last case matters most: if the destination never landed, the original must survive. Deletion
+must therefore never be attempted until the destination file is complete.
+
+Recognizing an already-imported file is explicitly **not** grounds for deletion. An identical copy
+existing in the library is not the same thing as this run having imported it, and deleting on that
+basis would turn a re-scan into silent data removal.
+
+If the destination is on the same filesystem, the move should avoid rewriting the file's bytes —
+moving a multi-gigabyte video must not require copying it first. The technique used must preserve
+the same guarantee as a copy: it must fail rather than overwrite if the destination has appeared
+since planning.
+
+The user must be told clearly, before confirming an import, that source files will be deleted.
+
+Failure to delete a source file after a successful import is a warning, not a failed import: the
+file did reach the library, and reporting it as a failure would be wrong.
 
 ---
 
@@ -858,7 +947,9 @@ Second run:
 
 Repeated imports must not create duplicates or overwrite existing files.
 
-This allows the source directory to function as a persistent import area.
+With `import_action = "copy"` this allows the source directory to function as a persistent import
+area. With `move`, a second run simply finds less to do, because the imported files are gone —
+which is the intended effect rather than a violation of idempotency.
 
 ---
 
@@ -954,19 +1045,44 @@ undated files and the collisions, since those are the items that need action.
 
 # 18. Import Progress
 
-During the import, the TUI should display progress information.
+The import runs as a sequence of named phases, and the interface must present them as a **log of
+steps, each with its own progress bar**:
 
-Useful information includes:
+```text
+✔ Scanning source directory      1,335 media files, 12 ignored
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-- Current file
-- Files processed / total
-- Current operation
-- Destination
-- Number successfully copied
-- Number skipped
-- Number failed
+✔ Reading photo metadata         1,248 photos read
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
 
-The application should remain responsive when processing large collections.
+✔ Resolving capture dates        1,332 dated, 3 undated
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+
+✔ Detecting RAW/JPEG pairs       312 JPEGs paired with a RAW
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✔ Checking destinations          977 to import
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+
+▶ Copying files                  IMG_2841.DNG
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━  64%
+```
+
+Requirements:
+
+- **Each step has its own progress bar.** A step whose size is not yet known shows an indeterminate
+  bar rather than a misleading 0%.
+- **Completed steps remain on screen.** A finished step is never replaced or cleared; it stays,
+  marked complete, with a short summary of what it did. The screen reads as a log of the whole run.
+- **Planning and copying share one log.** The steps that produced the plan must still be visible
+  while the copy runs, so confirming the import does not discard the history of how the plan was
+  built.
+- The view should follow the active step, and should reveal the summary once there is something to
+  read or act on.
+- The current file, running totals, and failures must be visible.
+
+The application should remain responsive when processing large collections. Scanning, metadata
+extraction and copying must therefore run off the interface's event loop.
 
 ---
 
@@ -1145,9 +1261,7 @@ The initial version does not need to:
 
 - Modify media metadata
 - Modify filenames
-- Modify source files
-- Delete imported files
-- Move source files
+- Modify the contents of source files
 - Re-encode media
 - Generate thumbnails
 - Upload media
@@ -1159,8 +1273,12 @@ The initial version does not need to:
 - Hash or index the destination libraries
 - Provide manual date correction
 
-Note that filesystem modification time **is** a sanctioned last-resort fallback for videos (see 8.3).
-It is never used for photos.
+Note two deliberate exceptions to the list above:
+
+- Filesystem modification time **is** a sanctioned last-resort fallback for videos (see 8.3). It is
+  never used for photos.
+- Deleting and moving source files **is** supported, but only under `import_action = "move"` and only
+  within the narrow rule in section 13.2. It is never the default.
 
 ---
 
@@ -1170,7 +1288,9 @@ The application should follow these principles:
 
 ### Safe
 
-The source media is never modified.
+Source media is never modified in place, and under the default `copy` action it is never removed at
+all. The `move` action is opt-in, is announced before the user confirms, and removes a source file
+only after that file has been successfully imported.
 
 ### Metadata-driven
 

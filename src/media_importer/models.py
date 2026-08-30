@@ -97,6 +97,26 @@ class ClobberPreference(Enum):
     OLDEST = "oldest"
 
 
+class ImportAction(Enum):
+    """Whether importing a file leaves the original behind.
+
+    COPY is the default and keeps the source tree read-only. MOVE deletes each
+    successfully imported source file, and only those: anything skipped,
+    undated, colliding, or already present is left where it is.
+    """
+
+    COPY = "copy"
+    MOVE = "move"
+
+    @property
+    def verb(self) -> str:
+        return "Copying" if self is ImportAction.COPY else "Moving"
+
+    @property
+    def past(self) -> str:
+        return "copied" if self is ImportAction.COPY else "moved"
+
+
 @dataclass
 class MediaItem:
     """A discovered, classified source file."""

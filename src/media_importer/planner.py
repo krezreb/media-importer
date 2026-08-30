@@ -37,7 +37,24 @@ from .scanner import scan
 
 log = logging.getLogger(__name__)
 
-ProgressFn = Callable[[str], None]
+
+@dataclass
+class Step:
+    """One phase of planning, reported so a UI can show it as its own bar.
+
+    `total` is None while a phase's size is not yet known, which renders as an
+    indeterminate bar rather than a misleading 0%.
+    """
+
+    key: str
+    label: str
+    total: int | None = None
+    completed: int = 0
+    done: bool = False
+    note: str = ""
+
+
+ProgressFn = Callable[[Step], None]
 
 
 @dataclass
@@ -58,12 +75,24 @@ def build_plan(
     resolver = DateResolver(extractor)
     plan = ImportPlan()
 
-    def progress(message: str) -> None:
+    def emit(step: Step) -> None:
         if on_progress:
-            on_progress(message)
+            on_progress(step)
+
+    def begin(key: str, label: str, total: int | None = None) -> Step:
+        step = Step(key, label, total)
+        emit(step)
+        return step
+
+    def finish(step: Step, note: str = "") -> None:
+        step.done = True
+        step.note = note
+        if step.total is not None:
+            step.completed = step.total
+        emit(step)
 
     # 1. Scan and classify.
-    progress("Scanning source directory...")
+    scanning = begin("scan", "Scanning source directory")
     items: list[MediaItem] = []
     assert config.source_path is not None
     for event in scan(config.source_path):
@@ -76,36 +105,52 @@ def build_plan(
             plan.ignored.append(IgnoredFile(event.path, IgnoreReason.UNSUPPORTED_EXTENSION))
             continue
         items.append(MediaItem(event.path, media_type))
+        scanning.completed = len(items)
+        if scanning.completed % 200 == 0:
+            emit(scanning)
 
-    progress(f"Found {len(items)} media files. Reading metadata...")
+    finish(scanning, f"{len(items):,} media files, {len(plan.ignored):,} ignored")
 
     # 2. Resolve dates.  Photos are prefetched in batches first, because
     #    exiftool's startup cost dwarfs its per-file cost.
+    photo_count = sum(1 for i in items if i.media_type is MediaType.PHOTO)
+    reading = begin("metadata", "Reading photo metadata", total=photo_count or None)
     resolver.prefetch(items)
+    finish(reading, f"{photo_count:,} photos read")
+
+    dating = begin("dates", "Resolving capture dates", total=len(items) or None)
     for n, item in enumerate(items, start=1):
-        if n % 50 == 0 or n == len(items):
-            progress(f"Resolving dates {n}/{len(items)}...")
+        dating.completed = n
+        if n % 25 == 0 or n == len(items):
+            emit(dating)
         try:
             item.resolved = resolver.resolve(item)
         except Exception as exc:
             log.exception("Failed to resolve date for %s", item.source_path)
             item.error = str(exc)
 
+    undated_count = sum(1 for i in items if not i.is_dated)
+    finish(dating, f"{len(items) - undated_count:,} dated, {undated_count:,} undated")
+
     # 3. Pairing, which must come after dates: a JPEG is only suppressed when
     #    its RAW actually resolved to something importable.
-    progress("Detecting RAW/JPEG pairs...")
+    matching = begin("pairs", "Detecting RAW/JPEG pairs")
     suppressed = pairing.suppressed_jpegs(items)
+    finish(matching, f"{len(suppressed):,} JPEGs paired with a RAW")
 
     # 4-7. Destinations, destination state, collisions, actions.
-    progress("Checking destinations...")
+    checking = begin("destinations", "Checking destinations", total=len(items) or None)
     assigned: dict[Path, PlanItem] = {}
     existing_cache: dict[Path, _Existing | None] = {}
 
-    for item in items:
+    for n, item in enumerate(items, start=1):
         plan.items.append(_plan_one(item, config, resolver, suppressed, assigned, existing_cache))
+        checking.completed = n
+        if n % 25 == 0 or n == len(items):
+            emit(checking)
 
     plan.check_partition()
-    progress("Plan ready.")
+    finish(checking, f"{len(plan.to_copy):,} to import")
     return plan
 
 

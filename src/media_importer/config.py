@@ -15,7 +15,7 @@ from pathlib import Path
 import tomli_w
 
 from .errors import ConfigurationError
-from .models import ClobberPreference, CollisionPolicy
+from .models import ClobberPreference, CollisionPolicy, ImportAction
 from .path_scheme import DEFAULT_SCHEME
 from .path_scheme import validate as validate_scheme
 
@@ -39,6 +39,7 @@ class Config:
     photo_library: Path | None = None
     video_library: Path | None = None
     import_path: str = DEFAULT_SCHEME
+    import_action: ImportAction = ImportAction.COPY
     on_collision: CollisionPolicy = CollisionPolicy.SKIP
     clobber_prefers: ClobberPreference = ClobberPreference.NEWEST
 
@@ -56,6 +57,7 @@ class Config:
             "photo_library": str(self.photo_library or ""),
             "video_library": str(self.video_library or ""),
             "import_path": self.import_path,
+            "import_action": self.import_action.value,
             "on_collision": self.on_collision.value,
             "clobber_prefers": self.clobber_prefers.value,
         }
@@ -66,6 +68,7 @@ _KNOWN_KEYS = {
     "photo_library",
     "video_library",
     "import_path",
+    "import_action",
     "on_collision",
     "clobber_prefers",
 }
@@ -96,6 +99,9 @@ def from_dict(data: dict) -> Config:
         photo_library=_as_path(data.get("photo_library")),
         video_library=_as_path(data.get("video_library")),
         import_path=str(data.get("import_path") or DEFAULT_SCHEME),
+        import_action=_as_enum(
+            data.get("import_action"), ImportAction, "import_action", ImportAction.COPY
+        ),
         on_collision=_as_enum(
             data.get("on_collision"), CollisionPolicy, "on_collision", CollisionPolicy.SKIP
         ),
@@ -113,7 +119,10 @@ def load(path: Path | None = None) -> Config:
     """Load configuration, creating a default file on first run."""
     target = path or config_file()
     if not target.exists():
-        cfg = Config()
+        # First run: default the import directory to the working directory the
+        # app was launched from, then persist it so it is visible and editable
+        # rather than an invisible implicit default.
+        cfg = Config(source_path=Path.cwd())
         save(cfg, target)
         return cfg
 

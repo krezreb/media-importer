@@ -15,7 +15,14 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import Action, CollisionResolution, ImportPlan, ImportReport, PlanItem
+from .models import (
+    Action,
+    CollisionResolution,
+    ImportAction,
+    ImportPlan,
+    ImportReport,
+    PlanItem,
+)
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +55,14 @@ def execute(
     plan: ImportPlan,
     callbacks: ImportCallbacks | None = None,
     should_stop: object = None,
+    action: ImportAction = ImportAction.COPY,
 ) -> ImportReport:
-    """Run every COPY in *plan*. One file's failure never aborts the rest."""
+    """Run every planned import in *plan*. One file's failure never aborts the rest.
+
+    With `ImportAction.MOVE` a source file is deleted only after its copy is
+    verifiably in place, and only for files that are actually imported.
+    Anything skipped, undated, colliding or already present keeps its source.
+    """
     cb = callbacks or ImportCallbacks()
     report = ImportReport(plan=plan)
 
@@ -64,7 +77,7 @@ def execute(
 
         cb.started(item, index, total)
         try:
-            _copy_one(item, swept)
+            _import_one(item, swept, action)
         except Exception as exc:
             log.exception("Failed to import %s", item.source_path)
             report.failed.append((item, str(exc)))
@@ -76,7 +89,7 @@ def execute(
     return report
 
 
-def _copy_one(item: PlanItem, swept: set[Path]) -> None:
+def _import_one(item: PlanItem, swept: set[Path], action: ImportAction) -> None:
     assert item.action is Action.COPY
     destination = item.destination_path
     assert destination is not None
@@ -91,6 +104,9 @@ def _copy_one(item: PlanItem, swept: set[Path]) -> None:
         swept.add(directory)
 
     clobbering = item.collision is CollisionResolution.CLOBBERED
+
+    if action is ImportAction.MOVE and not clobbering and _fast_move(item.source_path, destination):
+        return
 
     # The temporary lives in the destination directory, not /tmp: rename is
     # only atomic within one filesystem, and the library is very often on a
@@ -108,6 +124,44 @@ def _copy_one(item: PlanItem, swept: set[Path]) -> None:
                 tmp.unlink()
             except OSError:  # pragma: no cover
                 log.warning("Could not remove temporary file %s", tmp)
+
+    if action is ImportAction.MOVE:
+        # Reached only when _finalize did not raise, so the destination is
+        # complete and verified before the original is given up.
+        _remove_source(item.source_path)
+
+
+def _fast_move(source: Path, destination: Path) -> bool:
+    """Try to move within one filesystem without rewriting the bytes.
+
+    os.link is atomic, fails if the destination exists (so it keeps the same
+    exclusive-create guarantee as an ordinary copy), preserves the timestamps
+    for free, and is instant regardless of file size -- which matters a great
+    deal when moving multi-gigabyte video.
+
+    Returns False for a cross-device move (EXDEV), where the caller falls back
+    to copying.
+    """
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        raise FileExistsError(
+            f"Destination appeared after planning and was not overwritten: {destination}"
+        ) from None
+    except OSError:
+        return False  # different filesystem, or links unsupported
+
+    _remove_source(source)
+    return True
+
+
+def _remove_source(source: Path) -> None:
+    try:
+        source.unlink()
+    except OSError as exc:
+        # The import itself succeeded; failing to tidy up must not undo it or
+        # be reported as a failed import.
+        log.warning("Imported but could not remove source %s: %s", source, exc)
 
 
 def _finalize(tmp: Path, destination: Path, *, clobbering: bool) -> None:

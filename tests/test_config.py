@@ -5,7 +5,7 @@ import pytest
 from media_importer import config as config_module
 from media_importer.config import Config, from_dict, load, save, validate_for_import
 from media_importer.errors import ConfigurationError
-from media_importer.models import ClobberPreference, CollisionPolicy
+from media_importer.models import ClobberPreference, CollisionPolicy, ImportAction
 
 
 def test_creates_default_on_first_run(tmp_path):
@@ -141,3 +141,59 @@ def test_from_dict_expands_user(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg = from_dict({"source_path": "~/pics"})
     assert cfg.source_path == tmp_path / "pics"
+
+
+class TestImportAction:
+    def test_default_is_copy(self):
+        assert Config().import_action is ImportAction.COPY
+
+    def test_move_is_parsed(self, tmp_path):
+        target = tmp_path / "config.toml"
+        target.write_text('import_action = "move"\n')
+        assert load(target).import_action is ImportAction.MOVE
+
+    def test_invalid_action_is_rejected(self, tmp_path):
+        target = tmp_path / "config.toml"
+        target.write_text('import_action = "teleport"\n')
+        with pytest.raises(ConfigurationError, match="teleport"):
+            load(target)
+
+    def test_round_trips(self, tmp_path, libraries):
+        source, photos, videos = libraries
+        target = tmp_path / "config.toml"
+        save(
+            Config(
+                source_path=source,
+                photo_library=photos,
+                video_library=videos,
+                import_action=ImportAction.MOVE,
+            ),
+            target,
+        )
+        assert load(target).import_action is ImportAction.MOVE
+        assert 'import_action = "move"' in target.read_text()
+
+
+class TestDefaultSourceDirectory:
+    def test_first_run_defaults_to_the_working_directory(self, tmp_path, monkeypatch):
+        work = tmp_path / "somewhere"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        cfg = load(tmp_path / "config.toml")
+        assert cfg.source_path == work
+
+    def test_the_default_is_persisted_not_implicit(self, tmp_path, monkeypatch):
+        """It must be visible and editable in the config file, not recomputed."""
+        work = tmp_path / "somewhere"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        target = tmp_path / "config.toml"
+        load(target)
+        assert str(work) in target.read_text()
+
+    def test_an_existing_config_is_not_overridden_by_cwd(self, tmp_path, monkeypatch, libraries):
+        source, _, _ = libraries
+        target = tmp_path / "config.toml"
+        target.write_text(f'source_path = "{source}"\n')
+        monkeypatch.chdir(tmp_path)
+        assert load(target).source_path == source

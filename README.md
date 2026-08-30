@@ -5,7 +5,8 @@ metadata rather than by where the files happen to sit.
 
 Point it at a camera card, a phone backup, or a decade of accumulated mess. It reads each file's
 capture date, works out where the file belongs, shows you exactly what it is about to do, and only
-then copies. **Your source files are never modified, moved, renamed, or deleted.**
+then copies. **By default your source files are never modified, moved, renamed, or deleted** — and
+if you would rather empty the import folder as you go, there is an opt-in `move` mode.
 
 ```text
 IMPORT/                                PHOTO_LIBRARY/
@@ -31,8 +32,10 @@ IMPORT/                                PHOTO_LIBRARY/
 - **Separate photo and video libraries.**
 - **RAW + JPEG pairing.** When a camera wrote both, the RAW is imported and the JPEG left alone.
 - **Configurable destination layout.** `YYYY/MM/DD` by default, and freely changeable.
+- **Copy or move.** Keep the originals, or clear the import folder as files land.
 - **Safe repeated imports.** Run it as often as you like; nothing is duplicated or overwritten.
 - **Preview before copying.** Every import is planned in full and shown to you for confirmation.
+- **Mouse or keyboard.** Every control is clickable; nothing is keyboard-only.
 
 ## Requirements
 
@@ -119,10 +122,35 @@ python -m media_importer
 ```
 
 There are no command-line options. Everything is configured inside the TUI and remembered between
-runs, because this is a tool you use repeatedly rather than one you re-specify every time.
+runs, because this is a tool you use repeatedly rather than one you re-specify every time. Mouse and
+keyboard both work throughout.
 
-The main screen shows your current settings and lets you change any of them. Choosing **Start
-import** scans the source, builds a complete plan, and shows you a summary:
+The main screen puts every setting, its current value, and the button that changes it on one line:
+
+```text
+Source directory    /mnt/import                              Change
+Photo library       /srv/photos                              Change
+Video library       /srv/videos                              Change
+Path scheme         YYYY/MM/DD                               Change
+Import action       copy - source files are left alone       Change
+On collision        skip                                     Change
+```
+
+The source directory defaults to whatever directory you launched from, so running `media-importer`
+inside a freshly-mounted card generally needs no setup at all.
+
+Choosing **Start import process** scans the source and builds a complete plan, showing each phase as
+its own step with its own progress bar. Finished steps stay on screen, so the run reads as a log:
+
+```text
+✔ Scanning source directory      1,335 media files, 12 ignored
+✔ Reading photo metadata         1,248 photos read
+✔ Resolving capture dates        1,332 dated, 3 undated
+✔ Detecting RAW/JPEG pairs       312 JPEGs paired with a RAW
+✔ Checking destinations          977 to import
+```
+
+Then the summary:
 
 ```text
 Import summary
@@ -156,9 +184,12 @@ source_path      = "/mnt/import"
 photo_library    = "/srv/photos"
 video_library    = "/srv/videos"
 import_path      = "YYYY/MM/DD"
+import_action    = "copy"
 on_collision     = "skip"
 clobber_prefers  = "newest"
 ```
+
+On first run the file is created with `source_path` set to the directory you launched from.
 
 | Key | Meaning |
 | --- | --- |
@@ -166,6 +197,7 @@ clobber_prefers  = "newest"
 | `photo_library` | Destination root for photos. Created if missing. |
 | `video_library` | Destination root for videos. Created if missing. |
 | `import_path` | Destination layout. See below. |
+| `import_action` | `copy` or `move`. See below. |
 | `on_collision` | `skip`, `clobber`, or `rename`. See below. |
 | `clobber_prefers` | `newest` or `oldest`. Only used when `on_collision = "clobber"`. |
 
@@ -273,6 +305,41 @@ Two things that are deliberately *not* pairs:
 And if the RAW turns out to be undated, the pairing is abandoned and the JPEG is imported on its own
 merits — otherwise a bad RAW would take a perfectly good JPEG down with it.
 
+## Copy or move
+
+`import_action` decides what happens to the original after a file is imported.
+
+| Value | Behaviour |
+| --- | --- |
+| `copy` (default) | The original stays in the source directory. The source tree is strictly read-only. |
+| `move` | The original is deleted — but only once its copy is verifiably in the library. |
+
+`move` is the only thing this tool does that removes your data, so the rule is deliberately narrow:
+
+> A source file is deleted **only** when that same file was just imported, and **only** after the
+> destination copy is complete.
+
+Everything else keeps its original. A file is left exactly where it is when it was:
+
+- skipped as a JPEG paired with a RAW,
+- undated,
+- blocked by a collision,
+- already present in the library,
+- ignored as unsupported or as a symlink,
+- or failed for any reason during the copy.
+
+That last one is the important one: **if the copy did not land, the original survives.**
+
+Note that *already imported* is not grounds for deletion. Finding an identical file in the library is
+not the same as this run having imported it, and deleting on that basis would turn a harmless re-scan
+into silent data loss. If you want those originals gone, remove them yourself.
+
+Moving within one filesystem does not rewrite the file, so moving a folder of 4K video is instant
+rather than disk-bound. Across filesystems it falls back to copying and then deleting.
+
+The interface warns you on the main screen and again in the import summary whenever `move` is
+selected.
+
 ## Collisions
 
 A collision is when a destination path is already taken by a *different* file. This happens with two
@@ -291,7 +358,8 @@ to the same destination — the second of which would otherwise silently overwri
 
 ## Safety
 
-- Source files are never modified, moved, renamed, or deleted.
+- Source files are never modified in place. Under the default `copy` action they are never removed
+  at all; under `move` a file is removed only after it has been successfully imported.
 - Existing destination files are never silently overwritten.
 - Copies are written to a temporary file in the destination directory and moved into place
   atomically, so an interrupted run cannot leave a truncated file that looks imported.

@@ -179,9 +179,14 @@ source_path      = "/path/to/import"
 photo_library    = "/path/to/photos"
 video_library    = "/path/to/videos"
 import_path      = "YYYY/MM/DD"
+import_action    = "copy"
 on_collision     = "skip"
 clobber_prefers  = "newest"
 ```
+
+When no configuration file exists, `source_path` is initialised to `Path.cwd()` and written to the
+new file. Persisting it keeps the default visible and editable rather than making it an invisible
+behaviour that changes with the working directory.
 
 The application must create the configuration directory and default configuration when required.
 
@@ -199,12 +204,15 @@ source_path      Path
 photo_library    Path
 video_library    Path
 import_path      str
+import_action    ImportAction      enum: COPY | MOVE
 on_collision     CollisionPolicy   enum: SKIP | CLOBBER | RENAME
 clobber_prefers  ClobberPreference enum: NEWEST | OLDEST
 ```
 
-`on_collision` and `clobber_prefers` must be parsed into enums at load time, not carried as raw
-strings. An unrecognized value is a `ConfigurationError`, not a silent fallback to the default.
+`import_action`, `on_collision` and `clobber_prefers` must be parsed into enums at load time, not
+carried as raw strings. An unrecognized value is a `ConfigurationError`, not a silent fallback to the
+default — silently treating a typo'd `import_action` as `copy` would be merely wrong, whereas
+silently treating it as `move` would delete data.
 
 This is the complete v1 schema. Supported media extensions are **not** configurable in v1; they are
 defined in code (section 10). If that changes later, the extension sets move here rather than being
@@ -977,8 +985,40 @@ For each `COPY` operation:
 2. Copy the source file.
 3. Verify successful completion.
 4. Record the result.
+5. Under `import_action = "move"`, and only now that step 3 has succeeded, delete the source.
 
-Source files must remain untouched.
+## 24.1 Move
+
+The executor takes the `ImportAction` as a parameter; the planner is unaware of it, because whether a
+file is imported is a separate question from what happens to the original afterwards.
+
+Deletion happens **after** the destination is in place, never before and never in parallel. If any
+step fails, the source survives.
+
+Only files the executor actually imported may be deleted. Skipped, undated, colliding,
+already-imported, ignored and failed items are never touched — the executor only ever iterates
+`plan.to_copy`, which gives this property structurally rather than by a check that could be
+forgotten.
+
+### Same-filesystem fast path
+
+Rewriting the bytes of a multi-gigabyte video to move it across one disk is unacceptable. Prefer
+`os.link` followed by unlinking the source:
+
+- It is atomic.
+- It fails if the destination exists, preserving the same exclusive-create guarantee as an ordinary
+  copy (section 25).
+- It preserves timestamps for free.
+- It is instant regardless of file size.
+
+`os.link` raises `OSError` (EXDEV) across filesystems; fall back to the ordinary copy-then-delete
+path there.
+
+### Failure to delete
+
+If the destination copy succeeded but the source cannot be removed, log a warning and count the item
+as **imported**. The file did reach the library, and reporting a successful import as a failure would
+be misleading.
 
 ---
 
