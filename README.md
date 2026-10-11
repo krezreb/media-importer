@@ -95,30 +95,32 @@ If you are installing from source, `make check-tools` does the last two for you.
 
 ## Installation
 
-From PyPI, with [pipx](https://pipx.pypa.io/):
+Install from a clone of the repository with [pipx](https://pipx.pypa.io/), as your normal user
+(not with `sudo`):
 
 ```bash
+git clone https://github.com/krezreb/media-importer
+cd media-importer
 pipx ensurepath        # once; puts ~/.local/bin on your PATH (restart the shell afterwards)
-pipx install media-importer
+pipx install .
 ```
 
 pipx installs the app into its own virtualenv and puts the `media-importer` command on your PATH,
 so it never touches the system Python. Plain `pip install` into the system Python is refused on
 current Debian, Ubuntu and Fedora (`externally-managed-environment`).
 
-Upgrade with `pipx upgrade media-importer`, remove with `pipx uninstall media-importer`.
+To upgrade, run `git pull && pipx install --force .` in the clone. To remove, run
+`pipx uninstall media-importer`.
 
-From source, for development:
+For development, from the same clone:
 
 ```bash
-git clone https://github.com/krezreb/media-importer
-cd media-importer
 make install
 ```
 
 `make install` creates a virtualenv in `.venv` and installs the project there. The command is then
 `.venv/bin/media-importer` (or `make run`); it is not on your PATH unless you
-`source .venv/bin/activate`. To get a source checkout on your PATH instead, run `pipx install .`.
+`source .venv/bin/activate`.
 
 ## Usage
 
